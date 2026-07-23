@@ -147,6 +147,119 @@ def capacite_ELU_flexion_simple(section, fck, fyk, gamma_c=1.5, gamma_s=1.15,
                 fibres=fibres, arma=arma, Ac=Ac, H=H)
 
 
+def moment_reduit(section, fck, fyk, M_ELU_kNm, gamma_c=1.5, gamma_s=1.15,
+                   n_div=400):
+    """
+    Moment réduit µ = M_Ed/(b.d².fcd) et sa valeur limite µlim (frontière
+    pivot B "pur" — acier tendu à εyd pile au moment où le béton atteint
+    εcu2, cf. la notion de "pivot B pur" déjà utilisée dans le diagramme
+    d'interaction). Si µ > µlim, une section simplement armée (aciers
+    tendus seuls) ne suffit plus : des aciers comprimés sont nécessaires.
+
+    µlim est calculé par intégration EXACTE de la loi parabole-rectangle
+    (pas par la formule simplifiée du bloc rectangulaire équivalent
+    λ=0,8/η=1,0, plus approximative) : on intègre le béton seul (sans
+    acier) sur la hauteur comprimée x_lim = d.εcu2/(εcu2+εyd), et on
+    ramène le moment de la résultante béton au niveau des aciers tendus.
+
+    Retourne dict(mu, mu_lim, x_lim, d, besoin_aciers_comprimes, M_lim)
+    """
+    b, h, c_inf = section["b"], section["h"], section["c_inf"]
+    d = h - c_inf
+
+    mat = ec2.get_material_params(fck, fyk, gamma_c, gamma_s)
+    fcd = mat["fcd"] ;  ecu2 = mat["eps_cu2"] ;  eps_yd = mat["eps_yd"]
+
+    # x_lim : frontière pivot B pur, mesurée depuis la fibre sup. comprimée
+    x_lim = d * ecu2 / (ecu2 + eps_yd)
+
+    # Intégration exacte (béton seul, sans acier) sur H = h, en extrapolant
+    # linéairement le champ de déformation pour que ε=0 exactement à y=x_lim
+    # sous la fibre sup. (convention H centrée du moteur diagramme_interaction)
+    fibres = ec2.fibres_rect(b, h, n_div)
+    eps_top = ecu2
+    pente = ecu2 / x_lim
+    eps_bot = ecu2 - pente * h
+    N_lim, M_lim_centre = ec2.compute_NM(eps_top, eps_bot, h, fibres, [], mat)
+
+    # Report du moment du centre de section vers le niveau des aciers tendus
+    # (Varignon : M/A = M/G - N.(y_A - y_G) ; ici y_A = h/2 - d, position des
+    # aciers tendus sous le centre, DONC NÉGATIVE dans la convention centrée)
+    y_As = h / 2.0 - d
+    M_lim = M_lim_centre - N_lim * y_As   # kN.m, moment résistant béton seul / aciers tendus
+
+    mu_lim = (M_lim * 1e3) / (b * d ** 2 * fcd * 1e6)
+    mu = (abs(M_ELU_kNm) * 1e3) / (b * d ** 2 * fcd * 1e6)
+
+    return dict(mu=mu, mu_lim=mu_lim, x_lim=x_lim, d=d, M_lim=M_lim,
+                besoin_aciers_comprimes=mu > mu_lim)
+
+
+def etat_deformation_ELU(section, fck, fyk, gamma_c=1.5, gamma_s=1.15,
+                          M_ELU_kNm=None, n_div=400, tol=1e-6, max_iter=60):
+    """
+    Détermine l'état de déformation réel à l'ELU pour le ferraillage donné
+    (vérification), en supposant le pivot B actif (fibre extrême comprimée
+    à εcu2 — hypothèse standard pour une section normalement armée ; si le
+    solveur ne trouve pas de racine dans ce domaine, la section est très
+    probablement pilotée par le pivot A — cf. valeur de retour None).
+
+    M_ELU_kNm sert uniquement à choisir le signe (quelle nappe est tendue) ;
+    l'état renvoyé est l'état À LA RUINE (M=M_Rd côté correspondant), pas
+    l'état sous M_Ed — c'est l'état conventionnellement montré sur un
+    "diagramme des déformations" (cf. cahier des charges).
+
+    Retourne dict(eps_top, eps_bot, x, eps_sc, eps_st, y_sup, y_inf, N, M)
+    ou None si aucune racine trouvée dans le domaine pivot B.
+    """
+    b, h = section["b"], section["h"]
+    c_inf, c_sup = section["c_inf"], section["c_sup"]
+    As_inf, As_sup = section["As_inf"], section["As_sup"]
+
+    mat = ec2.get_material_params(fck, fyk, gamma_c, gamma_s)
+    fibres = ec2.fibres_rect(b, h, n_div)
+    arma = ec2.armatures_rect(h, c_inf, c_sup, As_inf, As_sup)
+    ecu2 = mat["eps_cu2"] ;  eud = mat["eps_ud"]
+
+    positif = (M_ELU_kNm is None) or (M_ELU_kNm >= 0)
+
+    def N_de(eps_var):
+        if positif:
+            N, _ = ec2.compute_NM(ecu2, eps_var, h, fibres, arma, mat)
+        else:
+            N, _ = ec2.compute_NM(eps_var, ecu2, h, fibres, arma, mat)
+        return N
+
+    lo, hi = -eud, ecu2
+    N_lo, N_hi = N_de(lo), N_de(hi)
+    if N_lo > 0 or N_hi < 0:
+        return None  # pas de racine en domaine pivot B -> pivot A probable
+
+    for _ in range(max_iter):
+        mid = 0.5 * (lo + hi)
+        if abs(N_de(mid)) < tol * max(1.0, abs(N_lo)):
+            break
+        if N_de(mid) > 0:
+            hi = mid
+        else:
+            lo = mid
+
+    eps_top, eps_bot = (ecu2, mid) if positif else (mid, ecu2)
+    N_eq, M_eq = ec2.compute_NM(eps_top, eps_bot, h, fibres, arma, mat)
+
+    x = ecu2 * h / (ecu2 - eps_bot) if positif else ecu2 * h / (ecu2 - eps_top)
+
+    def eps_a(y):
+        return eps_top + (eps_bot - eps_top) * (h / 2 - y) / h
+
+    y_sup = h / 2 - c_sup
+    y_inf = -h / 2 + c_inf
+
+    return dict(eps_top=eps_top, eps_bot=eps_bot, x=x, N=N_eq, M=M_eq,
+                y_sup=y_sup, y_inf=y_inf, eps_sup=eps_a(y_sup),
+                eps_inf=eps_a(y_inf), h=h, positif=positif)
+
+
 # ═══════════════════════════════════════════════════════════════
 # 4.  ANALYSE ÉLASTIQUE SECTION FISSURÉE — pour l'ELS (§7.2, §7.3.4)
 # ═══════════════════════════════════════════════════════════════
@@ -345,14 +458,24 @@ def justifier_flexion_simple(section, fck, fyk,
                               duree_chargement="long_terme"):
     """
     Justification complète d'une section rectangulaire en flexion simple :
-    capacité ELU, contraintes ELS, aciers minimaux (ELU + fissuration),
-    ouverture de fissure wk vs wmax(classe d'exposition).
+    moment réduit µ / besoin d'aciers comprimés, capacité ELU, état de
+    déformation ELU (diagramme), contraintes ELS, aciers minimaux
+    (ELU + ELS/fissuration), ouverture de fissure wk vs wmax(classe
+    d'exposition).
 
     Retourne un dict structuré avec tous les résultats + verdicts booléens.
     """
     resultats = {}
 
-    # --- ELU ---
+    # --- Moment réduit / besoin d'aciers comprimés ---
+    mr = moment_reduit(section, fck, fyk, M_ELU_kNm, gamma_c, gamma_s)
+    resultats["moment_reduit"] = mr
+
+    # --- État de déformation ELU (pour le diagramme) ---
+    etat = etat_deformation_ELU(section, fck, fyk, gamma_c, gamma_s, M_ELU_kNm)
+    resultats["deformation_ELU"] = etat  # peut être None si pivot A gouverne
+
+    # --- ELU (capacité) ---
     elu = capacite_ELU_flexion_simple(section, fck, fyk, gamma_c, gamma_s)
     M_Rd = elu["M_Rd_pos"] if M_ELU_kNm >= 0 else elu["M_Rd_neg"]
     resultats["ELU"] = dict(
@@ -374,16 +497,18 @@ def justifier_flexion_simple(section, fck, fyk,
         verifie_acier=els["sigma_st"] <= sigma_s_lim,
         detail=els)
 
-    # --- Aciers minimaux ---
+    # --- Aciers minimaux (ELU §9.2.1.1, et ELS/fissuration §7.3.2) ---
     amin_elu = acier_min_ELU(section, fck, fyk)
-    amin_fiss = acier_min_fissuration(section, fck, fyk)
+    amin_els = acier_min_fissuration(section, fck, fyk)
     As_inf = section["As_inf"] ;  As_sup = section["As_sup"]
     As_tendu = As_inf if M_ELU_kNm >= 0 else As_sup
     resultats["aciers_minimaux"] = dict(
         As_tendu_reel=As_tendu,
         As_min_ELU=amin_elu["As_min"], verifie_ELU=As_tendu >= amin_elu["As_min"],
-        As_min_fissuration=amin_fiss["As_min"], verifie_fissuration=As_tendu >= amin_fiss["As_min"],
-        detail_ELU=amin_elu, detail_fissuration=amin_fiss)
+        As_min_ELS=amin_els["As_min"], verifie_ELS=As_tendu >= amin_els["As_min"],
+        # alias conservés pour compatibilité avec du code appelant existant :
+        As_min_fissuration=amin_els["As_min"], verifie_fissuration=As_tendu >= amin_els["As_min"],
+        detail_ELU=amin_elu, detail_ELS=amin_els)
 
     # --- Ouverture de fissure ---
     wmax = WMAX_TABLE.get(classe_exposition, 0.3)
@@ -398,8 +523,9 @@ def justifier_flexion_simple(section, fck, fyk,
         resultats["ELS_contraintes"]["verifie_beton"],
         resultats["ELS_contraintes"]["verifie_acier"],
         resultats["aciers_minimaux"]["verifie_ELU"],
-        resultats["aciers_minimaux"]["verifie_fissuration"],
+        resultats["aciers_minimaux"]["verifie_ELS"],
         resultats["fissuration"]["verifie"],
+        not resultats["moment_reduit"]["besoin_aciers_comprimes"],
     ])
 
     return resultats
@@ -414,6 +540,18 @@ def imprimer_rapport(resultats):
     print("  JUSTIFICATION FLEXION SIMPLE — EC2")
     print("═" * 68)
 
+    mr = resultats["moment_reduit"]
+    print(f"\n[Moment réduit]  µ = {mr['mu']:.4f}   µlim = {mr['mu_lim']:.4f}"
+          f"   {'✘ ACIERS COMPRIMÉS NÉCESSAIRES' if mr['besoin_aciers_comprimes'] else '✔ Section simplement armée suffisante'}")
+
+    etat = resultats["deformation_ELU"]
+    if etat is not None:
+        print(f"\n[État de déformation à l'ELU]  (pivot B, à la ruine)")
+        print(f"  x (axe neutre / fibre comprimée) = {etat['x']*1000:.1f} mm")
+        print(f"  εsup = {etat['eps_sup']*1e3:+.2f}‰   εinf = {etat['eps_inf']*1e3:+.2f}‰")
+    else:
+        print(f"\n[État de déformation à l'ELU]  pivot A probable (section peu armée) — non calculé")
+
     e = resultats["ELU"]
     print(f"\n[ELU]  M_Ed = {e['M_Ed']:8.1f} kN·m   M_Rd = {e['M_Rd']:8.1f} kN·m"
           f"   (taux {e['taux']*100:5.1f}%)   {tag(e['verifie'])}")
@@ -426,7 +564,7 @@ def imprimer_rapport(resultats):
     a = resultats["aciers_minimaux"]
     print(f"\n[Aciers minimaux]  As (nappe tendue) = {a['As_tendu_reel']*1e4:.2f} cm²")
     print(f"  As,min ELU (§9.2.1.1)          = {a['As_min_ELU']*1e4:6.2f} cm²   {tag(a['verifie_ELU'])}")
-    print(f"  As,min fissuration (§7.3.2)    = {a['As_min_fissuration']*1e4:6.2f} cm²   {tag(a['verifie_fissuration'])}")
+    print(f"  As,min ELS/fissuration (§7.3.2) = {a['As_min_ELS']*1e4:6.2f} cm²   {tag(a['verifie_ELS'])}")
 
     f = resultats["fissuration"]
     print(f"\n[Ouverture de fissure]  classe {f['classe_exposition']}")
@@ -437,3 +575,243 @@ def imprimer_rapport(resultats):
     verdict = "✔  SECTION JUSTIFIÉE" if resultats["verifie_global"] else "✘  SECTION NON JUSTIFIÉE"
     print(f"  {verdict}")
     print("═" * 68)
+
+
+# ═══════════════════════════════════════════════════════════════
+# 8.  DIAGRAMME DE DÉFORMATION — section + profil de déformation ELU
+# ═══════════════════════════════════════════════════════════════
+
+def diagramme_deformation(section, etat, nom_fichier=None):
+    """
+    Trace le schéma de section (avec ferraillage) et, à côté, le profil
+    linéaire de déformation sur la hauteur à l'ELU (état renvoyé par
+    etat_deformation_ELU), avec la position de l'axe neutre et les
+    déformations aux nappes d'aciers.
+
+    section : dict(b, h, c_inf, c_sup, As_inf, As_sup)
+    etat    : dict renvoyé par etat_deformation_ELU() (non None)
+
+    Retourne la figure matplotlib (fig).
+    """
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as mpatches
+
+    b, h = section["b"], section["h"]
+    c_inf, c_sup = section["c_inf"], section["c_sup"]
+    As_inf, As_sup = section["As_inf"], section["As_sup"]
+
+    fig, (ax_sec, ax_def) = plt.subplots(1, 2, figsize=(8, 6),
+                                          gridspec_kw={"width_ratios": [1, 1.6]})
+
+    # -- Section --
+    sc = 1.0 / max(b, h)
+    bS, hS = b * sc, h * sc
+    ax_sec.add_patch(mpatches.Rectangle((-bS/2, -hS/2), bS, hS,
+                                         fc="#e3e9f5", ec="#333", lw=1.5))
+    r_b = 0.02
+    y_sup = (h/2 - c_sup) * sc
+    y_inf = (-h/2 + c_inf) * sc
+    if As_sup > 0:
+        ax_sec.add_patch(plt.Circle((0, y_sup), r_b, color="#b71c1c", zorder=4))
+    if As_inf > 0:
+        ax_sec.add_patch(plt.Circle((0, y_inf), r_b, color="#b71c1c", zorder=4))
+    ax_sec.set_xlim(-0.6, 0.6) ;  ax_sec.set_ylim(-0.62, 0.62)
+    ax_sec.set_aspect("equal") ;  ax_sec.axis("off")
+    ax_sec.set_title("Section", fontsize=10, fontweight="bold")
+
+    # -- Diagramme de déformation --
+    y_top, y_bot = hS/2, -hS/2
+    eps_top, eps_bot = etat["eps_top"], etat["eps_bot"]
+    eps_max = max(abs(eps_top), abs(eps_bot), 1e-6)
+
+    ax_def.axvline(0, color="#999", lw=0.8, ls=(0, (4, 3)))
+    ax_def.plot([eps_top, eps_bot], [y_top, y_bot], color="#1565C0", lw=2.5)
+    ax_def.plot([eps_top, eps_bot], [y_top, y_bot], "o", color="#1565C0", ms=6)
+
+    # axe neutre : x est mesuré depuis la fibre comprimée (sup. si positif,
+    # inf. sinon)
+    if etat["positif"]:
+        y_na = y_top - etat["x"] * sc
+    else:
+        y_na = y_bot + etat["x"] * sc
+    ax_def.axhline(y_na, color="#2E7D32", lw=1, ls="--")
+    ax_def.text(eps_max * 1.15, y_na, f"axe neutre\nx={etat['x']*1000:.0f}mm",
+                fontsize=8, color="#2E7D32", va="center")
+
+    ax_def.annotate(f"εsup={etat['eps_sup']*1e3:+.2f}‰", (eps_top, y_top),
+                     xytext=(10, 8), textcoords="offset points", fontsize=8.5,
+                     color="#1565C0", fontweight="bold")
+    ax_def.annotate(f"εinf={etat['eps_inf']*1e3:+.2f}‰", (eps_bot, y_bot),
+                     xytext=(10, -14), textcoords="offset points", fontsize=8.5,
+                     color="#1565C0", fontweight="bold")
+
+    ax_def.set_ylim(y_bot - 0.05, y_top + 0.05)
+    ax_def.set_xlim(-eps_max * 1.4, eps_max * 1.4)
+    ax_def.set_xlabel("Déformation ε", fontsize=9)
+    ax_def.set_yticks([])
+    ax_def.set_title("Diagramme de déformation (ELU, à la ruine)",
+                      fontsize=10, fontweight="bold")
+    ax_def.spines[["top", "right", "left"]].set_visible(False)
+
+    plt.tight_layout()
+    if nom_fichier:
+        plt.savefig(nom_fichier, dpi=150, bbox_inches="tight")
+    return fig
+
+
+def lambda_eta_EC2(fck):
+    """
+    Coefficients λ (réduction de hauteur comprimée) et η (réduction de
+    contrainte) du bloc rectangulaire équivalent, EC2 §3.1.7(3) :
+      fck ≤ 50 MPa : λ=0,8  η=1,0
+      fck > 50 MPa : λ=0,8-(fck-50)/400   η=1,0-(fck-50)/200
+    """
+    if fck <= 50.0:
+        return 0.8, 1.0
+    return 0.8 - (fck - 50.0) / 400.0, 1.0 - (fck - 50.0) / 200.0
+
+
+def schema_bloc_rectangulaire(section, fck, fyk, etat, gamma_c=1.5, gamma_s=1.15,
+                               nom_fichier=None):
+    """
+    Reproduit le schéma classique du cours (section / diagramme des
+    déformations avec pivots A-B / bloc de contraintes rectangulaire
+    équivalent Fc-Fs-z-Mu), rempli avec les valeurs réelles de l'état ELU
+    calculé par etat_deformation_ELU().
+
+    section : dict(b, h, c_inf, c_sup, As_inf, As_sup)
+    etat    : dict renvoyé par etat_deformation_ELU() (non None)
+
+    Retourne la figure matplotlib (fig).
+    """
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as mpatches
+
+    b, h = section["b"], section["h"]
+    c_inf, c_sup = section["c_inf"], section["c_sup"]
+    As_inf, As_sup = section["As_inf"], section["As_sup"]
+
+    mat = ec2.get_material_params(fck, fyk, gamma_c, gamma_s)
+    fcd = mat["fcd"]
+    lam, eta = lambda_eta_EC2(fck)
+
+    positif = etat["positif"]
+    d = (h - c_inf) if positif else (h - c_sup)
+    x = etat["x"]
+    eps_c = etat["eps_top"] if positif else etat["eps_bot"]
+    eps_s = etat["eps_bot"] if positif else etat["eps_top"]
+
+    lx = lam * x
+    z = d - lx / 2.0
+    Fc = eta * fcd * 1e3 * lx * b        # kN  (fcd MPa -> kN/m² = *1e3)
+    As_t = As_inf if positif else As_sup
+    fyd = mat["fyd"]
+    # contrainte réelle dans l'acier tendu à l'état calculé (peut être
+    # plastifiée ou non selon eps_s vs eps_yd)
+    sigma_s = ec2.sigma_s(abs(eps_s), mat) if As_t > 0 else fyd
+    Fs = As_t * sigma_s * 1e3            # kN
+    Mu = Fc * z                          # kN.m (résultante béton, cohérence ELU)
+
+    fig, axes = plt.subplots(1, 3, figsize=(12, 5),
+                              gridspec_kw={"width_ratios": [0.8, 1, 1.3]})
+    ax_sec, ax_def, ax_bloc = axes
+
+    # ── Panneau 1 : Section ──────────────────────────────────────────────
+    sc = 1.0 / h
+    bS, hS = b * sc, h * sc
+    ax_sec.add_patch(mpatches.Rectangle((-bS/2, 0), bS, hS, fc="white", ec="#333", lw=1.5))
+    y_acier = c_inf * sc if positif else (h - c_sup) * sc
+    ax_sec.add_patch(mpatches.Rectangle((-bS/2*0.55, y_acier - 0.012), bS*0.55, 0.024,
+                                         fc="#334", ec="none"))
+    ax_sec.annotate("", xy=(-bS/2-0.06, hS if positif else h*sc - y_acier),
+                     xytext=(-bS/2-0.06, y_acier if positif else 0),
+                     arrowprops=dict(arrowstyle="<->", color="#2E7D32", lw=1))
+    ax_sec.text(-bS/2-0.10, (hS+y_acier)/2 if positif else y_acier/2, "d",
+                fontsize=11, ha="right", va="center", style="italic")
+    ax_sec.annotate("", xy=(-bS/2, -0.06), xytext=(bS/2, -0.06),
+                     arrowprops=dict(arrowstyle="<->", color="#333", lw=1))
+    ax_sec.text(0, -0.11, "b", ha="center", fontsize=11, style="italic")
+    ax_sec.annotate("", xy=(bS/2+0.09, 0), xytext=(bS/2+0.09, hS),
+                     arrowprops=dict(arrowstyle="<->", color="#333", lw=1))
+    ax_sec.text(bS/2+0.13, hS/2, "h", fontsize=11, va="center", style="italic")
+    ax_sec.set_xlim(-0.65, 0.75) ;  ax_sec.set_ylim(-0.18, hS+0.1)
+    ax_sec.set_aspect("equal") ;  ax_sec.axis("off")
+
+    # ── Panneau 2 : Diagramme des déformations (pivots A/B) ─────────────
+    y_top, y_bot = hS, 0.0
+    y_x = hS - x * sc if positif else x * sc  # position de l'axe neutre (échelle section)
+    ax_def.axhline(y_x, color="#999", lw=0.8, ls=(0, (4, 3)))
+    ax_def.annotate("", xy=(0, y_top), xytext=(0, y_x),
+                     arrowprops=dict(arrowstyle="<->", color="#2E7D32", lw=1))
+    ax_def.text(-0.10, (y_top+y_x)/2, "x", fontsize=11, ha="right", va="center",
+                style="italic", color="#2E7D32")
+
+    eps_max = max(abs(eps_c), abs(eps_s), 1e-6)
+    e_axis_h = 0.9
+    def e_to_x(eps):
+        return eps / eps_max * e_axis_h
+
+    ax_def.axvline(0, color="#666", lw=0.8)
+    ax_def.plot([e_to_x(eps_c), e_to_x(eps_s)], [y_top, y_bot], color="#1565C0", lw=2.2)
+    ax_def.plot(e_to_x(eps_c), y_top, "o", color="#1565C0", ms=6)
+    ax_def.plot(e_to_x(eps_s), y_bot, "o", color="#1565C0", ms=6)
+    ax_def.text(e_to_x(eps_c)+0.05, y_top, f"B\nεc={eps_c*1e3:.2f}‰",
+                fontsize=9, color="#1565C0", va="center")
+    ax_def.text(e_to_x(eps_s)+0.05, y_bot, f"A\nεs={eps_s*1e3:.2f}‰",
+                fontsize=9, color="#1565C0", va="center")
+    ax_def.annotate("", xy=(e_axis_h+0.15, hS/2), xytext=(-e_axis_h-0.15, hS/2),
+                     arrowprops=dict(arrowstyle="->", color="#333", lw=1))
+    ax_def.text(e_axis_h+0.20, hS/2, "ε", fontsize=11, style="italic", va="center")
+    ax_def.annotate("", xy=(0, y_top+0.12), xytext=(0, y_bot-0.02),
+                     arrowprops=dict(arrowstyle="->", color="#333", lw=1))
+    ax_def.text(0.03, y_top+0.14, "y", fontsize=11, style="italic")
+    ax_def.set_xlim(-e_axis_h-0.35, e_axis_h+0.4) ;  ax_def.set_ylim(-0.15, y_top+0.22)
+    ax_def.axis("off")
+    ax_def.set_title("Diagramme des déformations", fontsize=10, fontweight="bold")
+
+    # ── Panneau 3 : Bloc rectangulaire équivalent (Fc, Fs, z, Mu) ────────
+    lxS = lam * x * sc
+    ax_bloc.add_patch(mpatches.Rectangle((0.05, hS - lxS), 0.35, lxS,
+                                          fc="none", ec="#333", lw=1.3))
+    ax_bloc.text(0.225, hS + 0.05, f"σc=η.fcd={eta*fcd:.1f} MPa",
+                 fontsize=8.5, ha="center")
+    ax_bloc.annotate("", xy=(0.42, hS), xytext=(0.42, hS - lxS),
+                      arrowprops=dict(arrowstyle="<->", color="#2E7D32", lw=1))
+    ax_bloc.text(0.46, hS - lxS/2, f"λ.x\n={lx*1000:.0f}mm", fontsize=8,
+                 color="#2E7D32", va="center")
+
+    y_Fc = hS - lxS/2
+    ax_bloc.annotate("", xy=(0.05, y_Fc), xytext=(-0.15, y_Fc),
+                      arrowprops=dict(arrowstyle="<-", color="#C62828", lw=2))
+    ax_bloc.text(-0.18, y_Fc, f"Fc={Fc:.0f}kN", fontsize=9, color="#C62828",
+                 ha="right", va="center", fontweight="bold")
+
+    y_acier2 = c_inf * sc if positif else (h - c_sup) * sc
+    ax_bloc.plot([0.05, 0.40], [y_acier2, y_acier2], color="#334", lw=3)
+    ax_bloc.annotate("", xy=(0.55, y_acier2), xytext=(0.05, y_acier2),
+                      arrowprops=dict(arrowstyle="->", color="#C62828", lw=2))
+    ax_bloc.text(0.58, y_acier2, f"Fs={Fs:.0f}kN\n(σs={sigma_s:.0f}MPa)",
+                 fontsize=8.5, color="#C62828", va="center", fontweight="bold")
+
+    ax_bloc.annotate("", xy=(0.85, y_Fc), xytext=(0.85, y_acier2),
+                      arrowprops=dict(arrowstyle="<->", color="#333", lw=1))
+    ax_bloc.text(0.90, (y_Fc+y_acier2)/2, f"z={z*1000:.0f}mm", fontsize=9,
+                 va="center", style="italic")
+
+    ax_bloc.annotate("", xy=(0.20, y_acier2 - 0.08), xytext=(0.30, y_acier2 - 0.08),
+                      arrowprops=dict(arrowstyle="->", color="#7B1FA2", lw=1.8,
+                                       connectionstyle="arc3,rad=0.6"))
+    ax_bloc.text(0.25, y_acier2 - 0.16, f"Mu={Mu:.0f} kN·m", fontsize=9.5,
+                 color="#7B1FA2", ha="center", fontweight="bold")
+
+    ax_bloc.set_xlim(-0.55, 1.15) ;  ax_bloc.set_ylim(-0.28, hS+0.15)
+    ax_bloc.axis("off")
+    ax_bloc.set_title("Bloc de contraintes équivalent", fontsize=10, fontweight="bold")
+
+    fig.suptitle(f"Justification ELU flexion simple — pivot {'B' if positif else 'B (mirroir)'}"
+                 f" — x={x*1000:.0f}mm, λ={lam:.3f}, η={eta:.3f}",
+                 fontsize=10.5, fontweight="bold", y=1.02)
+    plt.tight_layout()
+    if nom_fichier:
+        plt.savefig(nom_fichier, dpi=150, bbox_inches="tight")
+    return fig

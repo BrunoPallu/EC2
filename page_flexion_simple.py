@@ -90,6 +90,16 @@ if res["verifie_global"]:
 else:
     st.error("✘ Section NON justifiée — au moins un critère n'est pas satisfait", icon="⚠️")
 
+st.subheader("Moment réduit µ — besoin d'aciers comprimés")
+mr = res["moment_reduit"]
+col_mu1, col_mu2, col_mu3 = st.columns(3)
+col_mu1.metric("µ (moment réduit)", f"{mr['mu']:.4f}")
+col_mu2.metric("µlim (pivot B pur)", f"{mr['mu_lim']:.4f}")
+if mr["besoin_aciers_comprimes"]:
+    col_mu3.error("Aciers comprimés nécessaires", icon="⚠️")
+else:
+    col_mu3.success("Section simplement armée OK", icon="✅")
+
 col1, col2 = st.columns(2)
 
 with col1:
@@ -115,8 +125,8 @@ with col2:
     st.write(f"As réel = **{a['As_tendu_reel']*1e4:.2f} cm²**")
     st.write(f"As,min ELU (§9.2.1.1) = {a['As_min_ELU']*1e4:.2f} cm²  "
              + ("✔" if a["verifie_ELU"] else "✘"))
-    st.write(f"As,min fissuration (§7.3.2) = {a['As_min_fissuration']*1e4:.2f} cm²  "
-             + ("✔" if a["verifie_fissuration"] else "✘"))
+    st.write(f"As,min ELS / fissuration (§7.3.2) = {a['As_min_ELS']*1e4:.2f} cm²  "
+             + ("✔" if a["verifie_ELS"] else "✘"))
 
     st.subheader("Ouverture de fissure (§7.3.4)")
     f = res["fissuration"]
@@ -125,15 +135,42 @@ with col2:
     st.caption(f"Formule retenue : {f['detail']['formule']}")
 
 st.markdown("---")
+st.subheader("Diagramme de déformation à l'ELU")
+if res["deformation_ELU"] is not None:
+    col_diag, col_txt = st.columns([1.6, 1])
+    with col_diag:
+        fig = fs.diagramme_deformation(section, res["deformation_ELU"])
+        st.pyplot(fig, width="stretch")
+    with col_txt:
+        d = res["deformation_ELU"]
+        st.write(f"Axe neutre x = **{d['x']*1000:.1f} mm**")
+        st.write(f"εsup = **{d['eps_sup']*1e3:+.2f} ‰**")
+        st.write(f"εinf = **{d['eps_inf']*1e3:+.2f} ‰**")
+        st.caption("État à la ruine (pivot B), pas l'état sous M_Ed de service.")
+
+    st.subheader("Schéma classique — bloc de contraintes équivalent")
+    fig_bloc = fs.schema_bloc_rectangulaire(section, fck, fyk, res["deformation_ELU"],
+                                             gamma_c=gamma_c, gamma_s=gamma_s)
+    st.pyplot(fig_bloc, width="stretch")
+    st.caption("Diagramme des déformations (pivots A/B) et bloc rectangulaire équivalent "
+               "(λ, η — EC2 §3.1.7(3)), à titre de vérification croisée avec le calcul exact "
+               "parabole-rectangle ci-dessus (Mu du bloc ≈ M_Rd exact à moins de 1% près).")
+else:
+    st.info("Pivot A probable (section très peu armée) — diagramme non calculé pour ce cas.",
+            icon="ℹ️")
+
+st.markdown("---")
 st.subheader("Détail des résultats")
 
 df = pd.DataFrame([
+    ("µ (moment réduit)", f"{mr['mu']:.4f}"),
+    ("µlim", f"{mr['mu_lim']:.4f}"),
     ("M_Rd (ELU)", f"{res['ELU']['M_Rd']:.1f} kN·m"),
     ("σc (ELS)", f"{res['ELS_contraintes']['sigma_c']:.2f} MPa"),
     ("σs (ELS)", f"{res['ELS_contraintes']['sigma_s']:.1f} MPa"),
-    ("Axe neutre élastique x", f"{res['ELS_contraintes']['detail']['x']*1000:.1f} mm"),
+    ("Axe neutre élastique (ELS) x", f"{res['ELS_contraintes']['detail']['x']*1000:.1f} mm"),
     ("As,min ELU", f"{res['aciers_minimaux']['As_min_ELU']*1e4:.2f} cm²"),
-    ("As,min fissuration", f"{res['aciers_minimaux']['As_min_fissuration']*1e4:.2f} cm²"),
+    ("As,min ELS / fissuration", f"{res['aciers_minimaux']['As_min_ELS']*1e4:.2f} cm²"),
     ("wk", f"{res['fissuration']['wk']:.3f} mm"),
     ("sr,max", f"{res['fissuration']['detail']['sr_max']:.1f} mm"),
 ], columns=["Grandeur", "Valeur"])
