@@ -107,6 +107,77 @@ def k3_ANF(c_mm):
 
 
 # ═══════════════════════════════════════════════════════════════
+# 2bis.  GÉOMÉTRIE RÉELLE DU FERRAILLAGE (lits multiples)
+# ═══════════════════════════════════════════════════════════════
+
+def geometrie_nappe(h, enrobage_nominal, nb_barres_par_lit, phi_mm,
+                     entraxe_vertical_mm=None, cote="inf"):
+    """
+    Calcule la géométrie réelle d'une nappe d'armatures pouvant comporter
+    1 ou 2 lits (superposés), à partir des données physiques réelles :
+    nombre de barres par lit, diamètre, enrobage nominal (à la génératrice
+    de la barre du lit le plus proche du parement).
+
+    entraxe_vertical_mm : distance axe à axe entre lits successifs. Si
+    None, valeur par défaut = φ + 20 mm (écartement libre minimal usuel
+    entre lits, cf. cours BA / EC2 §8.2 — modifiable si le projet impose
+    une valeur différente, p.ex. pour le passage d'un vibreur).
+
+    cote : "inf" (nappe tendue en flexion positive, près du bas) ou
+           "sup" (près du haut) — pilote le sens de l'empilement des lits
+           (le lit 1 est toujours le plus proche du parement concerné).
+
+    Retourne dict(
+        As_total    : aire totale [m²]
+        d_eff       : bras de levier réel — distance de la fibre EXTRÊME
+                      OPPOSÉE (comprimée) au centroïde de la nappe [m]
+                      (c'est le "d" ou "d'" à utiliser dans les calculs)
+        c_eff       : enrobage EFFECTIF équivalent au centroïde, mesuré
+                      depuis le parement concerné [m] (= h - d_eff si
+                      cote="inf", = d_eff... attention, cf. code)
+        lits        : liste de dicts {y, nb, phi_mm, As} pour le dessin
+                      (y = position réelle en repère centré, + = haut)
+    )
+    """
+    phi = phi_mm / 1000.0
+    if entraxe_vertical_mm is None:
+        entraxe_mm = phi_mm + 20.0
+    else:
+        entraxe_mm = entraxe_vertical_mm
+    entraxe = entraxe_mm / 1000.0
+
+    lits = []
+    for i, nb in enumerate(nb_barres_par_lit):
+        if nb <= 0:
+            continue
+        # distance du CENTRE de la barre au parement concerné
+        dist_parement = enrobage_nominal + phi / 2.0 + i * entraxe
+        if cote == "inf":
+            y = -h / 2.0 + dist_parement
+        else:
+            y = +h / 2.0 - dist_parement
+        As_lit = nb * np.pi * (phi / 2.0) ** 2
+        lits.append(dict(y=y, nb=nb, phi_mm=phi_mm, As=As_lit,
+                          dist_parement=dist_parement))
+
+    As_total = sum(l["As"] for l in lits)
+    if As_total <= 0:
+        return dict(As_total=0.0, d_eff=h - enrobage_nominal, c_eff=enrobage_nominal,
+                    lits=[])
+
+    y_centroide = sum(l["y"] * l["As"] for l in lits) / As_total
+
+    if cote == "inf":
+        d_eff = h / 2.0 - y_centroide          # distance depuis le HAUT (fibre comprimée)
+        c_eff = h / 2.0 + y_centroide           # = h - d_eff, depuis le BAS
+    else:
+        d_eff = h / 2.0 + y_centroide           # distance depuis le BAS
+        c_eff = h / 2.0 - y_centroide           # depuis le HAUT
+
+    return dict(As_total=As_total, d_eff=d_eff, c_eff=c_eff, lits=lits)
+
+
+# ═══════════════════════════════════════════════════════════════
 # 3.  CAPACITÉ ELU — réutilise le moteur diagramme_interaction_EC2
 # ═══════════════════════════════════════════════════════════════
 
@@ -575,6 +646,114 @@ def imprimer_rapport(resultats):
     verdict = "✔  SECTION JUSTIFIÉE" if resultats["verifie_global"] else "✘  SECTION NON JUSTIFIÉE"
     print(f"  {verdict}")
     print("═" * 68)
+
+
+# ═══════════════════════════════════════════════════════════════
+# 7bis.  SCHÉMA DE SECTION DÉTAILLÉ — lits réels, enrobage, bras de levier
+# ═══════════════════════════════════════════════════════════════
+
+def schema_section_detaille(b, h, geom_inf=None, geom_sup=None, nom_fichier=None):
+    """
+    Schéma de section coté, à l'échelle, montrant le ferraillage RÉEL :
+    - chaque lit dessiné séparément (bon nombre de barres, bon diamètre)
+    - enrobage réel coté (jusqu'au nu de la barre du 1er lit)
+    - bras de levier réel d_eff coté (jusqu'au centroïde de la nappe,
+      qui ne coïncide avec le 1er lit que s'il n'y a qu'un seul lit)
+
+    geom_inf, geom_sup : dict renvoyés par geometrie_nappe() (ou None si
+    la nappe est vide).
+
+    Retourne la figure matplotlib (fig).
+    """
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as mpatches
+
+    sc = 1.0 / h
+    bS, hS = b * sc, h * sc
+
+    fig, ax = plt.subplots(figsize=(5.5, 8.5))
+    ax.add_patch(mpatches.Rectangle((-bS/2, 0), bS, hS, fc="#eef1f7", ec="#333", lw=1.6))
+
+    r_scale = min(bS, hS)
+
+    def dessiner_nappe(geom, cote):
+        if geom is None or geom["As_total"] <= 0:
+            return
+        for i, lit in enumerate(geom["lits"]):
+            y_S = (lit["y"] + h/2) * sc   # repère section (0 en bas)
+            r_b = 0.018 + 0.0035 * lit["phi_mm"] / 12.0
+            nb = lit["nb"]
+            marge = bS * 0.08
+            xs = np.linspace(-bS/2 + marge, bS/2 - marge, nb) if nb > 1 else [0.0]
+            for xb in xs:
+                ax.add_patch(plt.Circle((xb, y_S), r_b, color="#b71c1c", zorder=5))
+            label = f"Lit {i+1} : {nb}HA{int(lit['phi_mm'])}"
+            side = -1 if cote == "inf" else 1
+            ax.annotate(label, (bS/2 + marge, y_S),
+                        xytext=(bS/2 + 0.10, y_S), fontsize=8.2,
+                        va="center", ha="left", color="#7a1414")
+
+        # Enrobage réel (jusqu'au nu du lit 1)
+        lit1 = geom["lits"][0]
+        y1_S = (lit1["y"] + h/2) * sc
+        phi1 = lit1["phi_mm"] / 1000.0 * sc
+        if cote == "inf":
+            y_nu = 0.0
+            y_bar_nu = y1_S - phi1/2
+            ax.annotate("", xy=(-bS/2 - 0.14, y_nu), xytext=(-bS/2 - 0.14, y_bar_nu),
+                        arrowprops=dict(arrowstyle="<->", color="#2E7D32", lw=1))
+            ax.text(-bS/2 - 0.17, (y_nu+y_bar_nu)/2, f"c={geom['lits'][0]['dist_parement']*1000 - lit1['phi_mm']/2:.0f}mm",
+                    fontsize=7.8, color="#2E7D32", ha="right", va="center")
+        else:
+            y_nu = hS
+            y_bar_nu = y1_S + phi1/2
+            ax.annotate("", xy=(-bS/2 - 0.14, y_nu), xytext=(-bS/2 - 0.14, y_bar_nu),
+                        arrowprops=dict(arrowstyle="<->", color="#2E7D32", lw=1))
+            ax.text(-bS/2 - 0.17, (y_nu+y_bar_nu)/2, f"c={geom['lits'][0]['dist_parement']*1000 - lit1['phi_mm']/2:.0f}mm",
+                    fontsize=7.8, color="#2E7D32", ha="right", va="center")
+
+        # Bras de levier réel (jusqu'au centroïde de la nappe)
+        if cote == "inf":
+            y_centroid_S = (h - geom["d_eff"]) * sc   # centroïde, repère bas=0
+        else:
+            y_centroid_S = geom["d_eff"] * sc
+        if cote == "inf":
+            y_opp = hS
+            ax.annotate("", xy=(bS/2 + 0.42, y_opp), xytext=(bS/2 + 0.42, y_centroid_S),
+                        arrowprops=dict(arrowstyle="<->", color="#1565C0", lw=1.1))
+            ax.text(bS/2 + 0.45, (y_opp+y_centroid_S)/2, f"d={geom['d_eff']*1000:.0f}mm",
+                    fontsize=8.5, color="#1565C0", va="center", fontweight="bold")
+        else:
+            y_opp = 0.0
+            ax.annotate("", xy=(bS/2 + 0.42, y_opp), xytext=(bS/2 + 0.42, y_centroid_S),
+                        arrowprops=dict(arrowstyle="<->", color="#1565C0", lw=1.1))
+            ax.text(bS/2 + 0.45, (y_opp+y_centroid_S)/2, f"d'={geom['d_eff']*1000:.0f}mm",
+                    fontsize=8.5, color="#1565C0", va="center", fontweight="bold")
+        # marqueur du centroïde (si >1 lit, distinct des barres)
+        if len(geom["lits"]) > 1:
+            ax.plot(0, y_centroid_S, "+", color="#1565C0", ms=12, mew=2, zorder=6)
+
+    dessiner_nappe(geom_inf, "inf")
+    dessiner_nappe(geom_sup, "sup")
+
+    # Cotes b, h
+    ax.annotate("", xy=(-bS/2, -0.08), xytext=(bS/2, -0.08),
+                arrowprops=dict(arrowstyle="<->", color="#333", lw=1))
+    ax.text(0, -0.13, f"b={b*100:.0f}cm", ha="center", fontsize=9)
+    ax.annotate("", xy=(bS/2+0.75, 0), xytext=(bS/2+0.75, hS),
+                arrowprops=dict(arrowstyle="<->", color="#333", lw=1))
+    ax.text(bS/2+0.80, hS/2, f"h={h*100:.0f}cm", fontsize=9, va="center", rotation=90)
+
+    ax.set_xlim(-bS/2 - 0.9, bS/2 + 1.5)
+    ax.set_ylim(-0.22, hS + 0.15)
+    ax.set_aspect("equal")
+    ax.axis("off")
+    ax.set_title("Section — ferraillage réel", fontsize=11, fontweight="bold")
+
+    plt.tight_layout()
+    if nom_fichier:
+        plt.savefig(nom_fichier, dpi=150, bbox_inches="tight")
+    return fig
 
 
 # ═══════════════════════════════════════════════════════════════

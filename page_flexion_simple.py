@@ -43,9 +43,17 @@ with st.sidebar:
 
     st.header("3. Ferraillage (nappe tendue)")
     st.caption("Sous le moment ELU saisi ci-dessous : nappe inf. si M≥0, nappe sup. si M<0")
+    phi_barre = st.number_input("Ø barres [mm]", value=16.0, step=1.0)
+    nb_lits = st.radio("Nombre de lits", [1, 2], horizontal=True)
     col1, col2 = st.columns(2)
-    nb_barres = col1.number_input("Nb barres", value=4, step=1, min_value=1)
-    phi_barre = col2.number_input("Ø [mm]", value=16.0, step=1.0)
+    nb_lit1 = col1.number_input("Nb barres — lit 1 (près du parement)", value=4, step=1, min_value=1)
+    nb_lit2 = col2.number_input("Nb barres — lit 2", value=2, step=1, min_value=0,
+                                 disabled=(nb_lits == 1))
+    entraxe_lits = st.number_input(
+        "Entraxe vertical entre lits [mm]", value=phi_barre + 20.0, step=1.0,
+        disabled=(nb_lits == 1),
+        help="Distance axe à axe entre lits. Défaut = Ø + 20mm (écartement usuel).")
+    nb_barres_par_lit = [int(nb_lit1), int(nb_lit2) if nb_lits == 2 else 0]
 
     st.header("4. Sollicitations")
     M_ELU = st.number_input("M_Ed ELU [kN·m]", value=150.0, step=10.0,
@@ -62,19 +70,32 @@ with st.sidebar:
 # ═══════════════════════════════════════════════════════════════════════
 # CALCUL
 # ═══════════════════════════════════════════════════════════════════════
-As = nb_barres * np.pi * (phi_barre / 1000 / 2) ** 2
-if M_ELU >= 0:
-    section = dict(b=b, h=h, c_inf=c_inf, c_sup=c_sup, As_inf=As, As_sup=0.0)
-else:
-    section = dict(b=b, h=h, c_inf=c_inf, c_sup=c_sup, As_inf=0.0, As_sup=As)
+positif = M_ELU >= 0
+cote = "inf" if positif else "sup"
+enrobage_nominal = c_inf if positif else c_sup
 
-st.sidebar.metric("As nappe tendue", f"{As*1e4:.2f} cm²")
+geom = fs.geometrie_nappe(h, enrobage_nominal, nb_barres_par_lit, phi_barre,
+                           entraxe_vertical_mm=entraxe_lits, cote=cote)
+As = geom["As_total"]
+
+# Section "effective" transmise au moteur de calcul : c_eff reproduit
+# exactement le bras de levier réel (centroïde des lits), quel que soit
+# le nombre de lits — aucune autre fonction du moteur n'a besoin d'être
+# modifiée pour ça.
+if positif:
+    section = dict(b=b, h=h, c_inf=geom["c_eff"], c_sup=c_sup, As_inf=As, As_sup=0.0)
+else:
+    section = dict(b=b, h=h, c_inf=c_inf, c_sup=geom["c_eff"], As_inf=0.0, As_sup=As)
+
+st.sidebar.metric("As nappe tendue (réel)", f"{As*1e4:.2f} cm²")
+st.sidebar.caption(f"Bras de levier réel d = {geom['d_eff']*1000:.1f} mm "
+                    f"(enrobage équivalent = {geom['c_eff']*1000:.1f} mm)")
 
 try:
     res = fs.justifier_flexion_simple(
         section, fck=fck, fyk=fyk,
         M_ELU_kNm=M_ELU, M_ELS_kNm=M_ELS,
-        nb_barres_tendues=nb_barres, phi_barre_mm=phi_barre,
+        nb_barres_tendues=nb_barres_par_lit[0], phi_barre_mm=phi_barre,
         classe_exposition=classe_exposition,
         gamma_c=gamma_c, gamma_s=gamma_s,
         duree_chargement=duree)
@@ -89,6 +110,15 @@ if res["verifie_global"]:
     st.success("✔ Section justifiée — tous les critères sont satisfaits", icon="✅")
 else:
     st.error("✘ Section NON justifiée — au moins un critère n'est pas satisfait", icon="⚠️")
+
+st.subheader("Sections d'acier minimales requises")
+a0 = res["aciers_minimaux"]
+col_a1, col_a2, col_a3 = st.columns(3)
+col_a1.metric("As,min ELU (§9.2.1.1)", f"{a0['As_min_ELU']*1e4:.2f} cm²")
+col_a2.metric("As,min ELS / fissuration (§7.3.2)", f"{a0['As_min_ELS']*1e4:.2f} cm²")
+col_a3.metric("As réel mis en place", f"{a0['As_tendu_reel']*1e4:.2f} cm²",
+              delta="✔ suffisant" if (a0["verifie_ELU"] and a0["verifie_ELS"]) else "✘ insuffisant",
+              delta_color="normal" if (a0["verifie_ELU"] and a0["verifie_ELS"]) else "inverse")
 
 st.subheader("Moment réduit µ — besoin d'aciers comprimés")
 mr = res["moment_reduit"]
@@ -133,6 +163,24 @@ with col2:
     st.write(f"wk = **{f['wk']:.3f} mm**  (wmax = {f['wmax']:.2f} mm, classe {f['classe_exposition']})  "
              + ("✔" if f["verifie"] else "✘"))
     st.caption(f"Formule retenue : {f['detail']['formule']}")
+
+st.markdown("---")
+st.subheader("Schéma de section détaillé")
+geom_inf_plot = geom if positif else None
+geom_sup_plot = geom if not positif else None
+fig_sec = fs.schema_section_detaille(b, h, geom_inf=geom_inf_plot, geom_sup=geom_sup_plot)
+col_sec1, col_sec2 = st.columns([1.3, 1])
+with col_sec1:
+    st.pyplot(fig_sec, width="stretch")
+with col_sec2:
+    st.write(f"**{len([n for n in nb_barres_par_lit if n>0])} lit(s)** — Ø{phi_barre:.0f}mm")
+    for i, lit in enumerate(geom["lits"]):
+        st.write(f"Lit {i+1} : {lit['nb']} barres — à {lit['dist_parement']*1000:.0f}mm du parement")
+    st.write(f"Enrobage réel (lit 1) = **{geom['lits'][0]['dist_parement']*1000 - phi_barre/2:.0f} mm**"
+             if geom["lits"] else "—")
+    st.write(f"Bras de levier réel **d = {geom['d_eff']*1000:.1f} mm**")
+    st.caption("Le bras de levier tient compte du diamètre des barres, du nombre de lits "
+               "et de l'enrobage réel (centroïde pondéré des lits).")
 
 st.markdown("---")
 st.subheader("Diagramme de déformation à l'ELU")
