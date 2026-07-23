@@ -266,6 +266,101 @@ def moment_reduit(section, fck, fyk, M_ELU_kNm, gamma_c=1.5, gamma_s=1.15,
                 besoin_aciers_comprimes=mu > mu_lim)
 
 
+def _moment_beton_seul(x, h, fibres, mat, d):
+    """
+    Moment résistant du béton seul (sans acier), ramené au niveau des
+    aciers tendus, pour une profondeur d'axe neutre x donnée (pivot B :
+    εc,sup=εcu2 fixé). Fonction interne à moment_reduit()/acier_theorique_ELU().
+    Retourne (Fc [kN], M_A [kN.m], eps_bot_extreme).
+    """
+    ecu2 = mat["eps_cu2"]
+    pente = ecu2 / x
+    eps_bot = ecu2 - pente * h
+    N_c, M_c_centre = ec2.compute_NM(ecu2, eps_bot, h, fibres, [], mat)
+    y_As = h / 2.0 - d
+    M_A = M_c_centre - N_c * y_As
+    return N_c, M_A, eps_bot
+
+
+def acier_theorique_ELU(section, fck, fyk, M_ELU_kNm, gamma_c=1.5, gamma_s=1.15,
+                         n_div=400, tol=1e-6, max_iter=60):
+    """
+    Calcule la section d'acier théoriquement NÉCESSAIRE pour équilibrer
+    M_ELU_kNm (dimensionnement, par opposition à la vérification d'un
+    ferraillage déjà choisi) : résolution exacte (parabole-rectangle,
+    pas le bloc simplifié) par recherche de la profondeur d'axe neutre x
+    telle que le moment résistant du béton seul, ramené au niveau des
+    aciers tendus, égale M_Ed.
+
+    Si µ > µlim (aciers comprimés nécessaires, cf. moment_reduit), la
+    section est calculée en double armature selon la méthode classique :
+    - As1 équilibre M_lim (béton seul à x_lim) avec l'acier tendu à fyd
+    - le complément ΔM = M_Ed - M_lim est équilibré par le couple
+      (aciers comprimés As', aciers tendus additionnels As2) au bras de
+      levier (d-d')
+
+    Retourne dict(As_theorique, As1, As2, As_comprime_theorique, x, cas)
+    où cas ∈ {"simple", "double"}.
+    """
+    b, h, c_inf = section["b"], section["h"], section["c_inf"]
+    c_sup = section["c_sup"]
+    d = h - c_inf
+    d_prime = c_sup
+
+    mat = ec2.get_material_params(fck, fyk, gamma_c, gamma_s)
+    fyd = mat["fyd"] ;  ecu2 = mat["eps_cu2"] ;  eps_yd = mat["eps_yd"]
+    fibres = ec2.fibres_rect(b, h, n_div)
+    M_Ed = abs(M_ELU_kNm)
+
+    x_lim = d * ecu2 / (ecu2 + eps_yd)
+    _, M_lim, _ = _moment_beton_seul(x_lim, h, fibres, mat, d)
+
+    if M_Ed <= M_lim:
+        # ── Cas simple armature : recherche de x par dichotomie ────────
+        lo, hi = 1e-4, x_lim
+        _, M_lo, _ = _moment_beton_seul(lo, h, fibres, mat, d)
+        _, M_hi, _ = _moment_beton_seul(hi, h, fibres, mat, d)
+        for _ in range(max_iter):
+            mid = 0.5 * (lo + hi)
+            _, M_mid, _ = _moment_beton_seul(mid, h, fibres, mat, d)
+            if abs(M_mid - M_Ed) < tol * max(1.0, M_Ed):
+                break
+            if M_mid > M_Ed:
+                hi = mid
+            else:
+                lo = mid
+        x = mid
+        Fc, M_x, eps_bot_extreme = _moment_beton_seul(x, h, fibres, mat, d)
+        # déformation de l'acier tendu (niveau y = -h/2+c_inf)
+        pente = ecu2 / x
+        eps_s = ecu2 - pente * (h - c_inf)   # = eps au niveau des aciers (>0 conv. compression)
+        sigma_s_t = abs(ec2.sigma_s(eps_s, mat))
+        As_theo = Fc / (sigma_s_t * 1e3)   # Fc[kN] / (sigma[MPa]=1e3 kN/m²) -> m²
+
+        return dict(As_theorique=As_theo, As1=As_theo, As2=0.0,
+                    As_comprime_theorique=0.0, x=x, d=d, cas="simple")
+
+    else:
+        # ── Cas double armature ─────────────────────────────────────────
+        Fc_lim, _, eps_bot_lim = _moment_beton_seul(x_lim, h, fibres, mat, d)
+        As1 = Fc_lim / (fyd * 1e3)   # tendu à fyd (pivot B pur -> juste à εyd)
+
+        # déformation des aciers comprimés à x=x_lim (profondeur d' sous la
+        # fibre sup. comprimée) : eps(y_from_top) = ecu2.(1 - y_from_top/x_lim)
+        pente = ecu2 / x_lim
+        eps_sc = ecu2 - pente * d_prime
+        sigma_sc = ec2.sigma_s(eps_sc, mat)  # compression -> positif
+
+        delta_M = M_Ed - M_lim
+        levier = d - d_prime
+        As_comprime = delta_M / (sigma_sc * 1e3 * levier) if levier > 0 else np.inf
+        As2 = delta_M / (fyd * 1e3 * levier) if levier > 0 else np.inf
+        As_theo = As1 + As2
+
+        return dict(As_theorique=As_theo, As1=As1, As2=As2,
+                    As_comprime_theorique=As_comprime, x=x_lim, d=d, cas="double")
+
+
 def etat_deformation_ELU(section, fck, fyk, gamma_c=1.5, gamma_s=1.15,
                           M_ELU_kNm=None, n_div=400, tol=1e-6, max_iter=60):
     """
@@ -365,12 +460,18 @@ def inertie_fissuree(b, x, d, d_prime, As, As_prime, n):
     return I_beton + I_ast + I_asc
 
 
-def contraintes_ELS(section, fck, M_ELS_kNm, Es=200_000.0):
+def contraintes_ELS(section, fck, M_ELS_kNm, Es=200_000.0, n_impose=None):
     """
     Contraintes élastiques en section fissurée sous moment de service
     M_ELS (combinaison caractéristique, en kN·m — signe : positif = fibre
     sup. comprimée, aciers inf. tendus, comme pour le diagramme d'inter-
     action).
+
+    n_impose : coefficient d'équivalence n=Es/Ec à utiliser directement
+    (p.ex. 15, valeur forfaitaire usuelle — cf. cahier des charges). Si
+    None (défaut), n est calculé précisément à partir de Ecm(fck) selon
+    le Tableau 3.1 EC2 (méthode plus rigoureuse mais moins "standard"
+    que le n=15 traditionnellement utilisé en préconception).
 
     Retourne dict(x, I_fiss, sigma_c, sigma_st, sigma_sc, n, Ecm)
     """
@@ -381,7 +482,7 @@ def contraintes_ELS(section, fck, M_ELS_kNm, Es=200_000.0):
 
     carac = caracteristiques_beton(fck)
     Ecm = carac["Ecm"]
-    n = Es / Ecm
+    n = n_impose if n_impose is not None else Es / Ecm
 
     M = abs(M_ELS_kNm) * 1e3  # kN.m -> N.m ... on travaille en unités SI (N, m)
     # NB : b, h en m -> x en m ; on garde M en N.m, b en m => contraintes en Pa,
@@ -401,6 +502,72 @@ def contraintes_ELS(section, fck, M_ELS_kNm, Es=200_000.0):
 
     return dict(x=x, I_fiss=I, sigma_c=sigma_c, sigma_st=sigma_st,
                 sigma_sc=sigma_sc, n=n, Ecm=Ecm, d=d)
+
+
+def acier_theorique_ELS(section, fck, fyk, M_ELS_kNm, gamma_c=1.5, gamma_s=1.15,
+                         Es=200_000.0, n_impose=None, tol=1e-5, max_iter=60):
+    """
+    Calcule la section d'acier tendu théoriquement NÉCESSAIRE pour que
+    les DEUX limites de contrainte ELS (§7.2) soient respectées :
+      σc ≤ k1.fck   et   σs ≤ k3.fyk
+
+    Méthode : pour chacun des deux critères pris séparément, on cherche
+    par dichotomie l'aire d'acier tendu As qui amène exactement la
+    contrainte concernée à sa valeur limite (σs(As) est décroissante en
+    As, σc(As) croît légèrement puis se stabilise) ; l'As théorique
+    retenu est le plus grand des deux (celui qui gouverne), garantissant
+    que les deux critères sont satisfaits simultanément.
+
+    Retourne dict(As_theorique_ELS, As_critere_acier, As_critere_beton,
+                  critere_gouvernant, sigma_c_lim, sigma_s_lim)
+    """
+    positif = M_ELS_kNm >= 0
+    sigma_c_lim = COEFFS_RECOMMANDES["k1_contrainte_beton"] * fck
+    sigma_s_lim = COEFFS_RECOMMANDES["k3_contrainte_acier"] * fyk
+
+    def _section_avec_As(As_trial):
+        sec2 = dict(section)
+        if positif:
+            sec2["As_inf"] = As_trial
+        else:
+            sec2["As_sup"] = As_trial
+        return sec2
+
+    def _contraintes(As_trial):
+        r = contraintes_ELS(_section_avec_As(As_trial), fck, M_ELS_kNm,
+                            Es=Es, n_impose=n_impose)
+        return r["sigma_c"], r["sigma_st"]
+
+    def _bissection(critere_fn, lo=1e-5, hi=0.05):
+        # critere_fn(As) doit être décroissante et changer de signe sur [lo,hi]
+        f_lo, f_hi = critere_fn(lo), critere_fn(hi)
+        if f_lo < 0:
+            # même l'aire minimale suffit -> pas de contrainte active, on
+            # renvoie une valeur très faible (section non gouvernante)
+            return lo
+        if f_hi > 0:
+            # même une aire énorme ne suffit pas (cas très rare/dégénéré)
+            hi = 0.5  # dernier recours, section manifestement énorme
+        for _ in range(max_iter):
+            mid = 0.5 * (lo + hi)
+            f_mid = critere_fn(mid)
+            if abs(f_mid) < tol:
+                break
+            if f_mid > 0:
+                lo = mid
+            else:
+                hi = mid
+        return mid
+
+    As_acier = _bissection(lambda As: _contraintes(As)[1] - sigma_s_lim)
+    As_beton = _bissection(lambda As: _contraintes(As)[0] - sigma_c_lim)
+
+    As_theorique_ELS = max(As_acier, As_beton)
+    critere_gouvernant = "acier (σs)" if As_acier >= As_beton else "béton (σc)"
+
+    return dict(As_theorique_ELS=As_theorique_ELS, As_critere_acier=As_acier,
+                As_critere_beton=As_beton, critere_gouvernant=critere_gouvernant,
+                sigma_c_lim=sigma_c_lim, sigma_s_lim=sigma_s_lim)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -442,13 +609,15 @@ def acier_min_fissuration(section, fck, fyk, k=1.0, k1_contrainte_beton=0.6):
 
 def ouverture_fissure(section, fck, M_ELS_kNm, nb_barres_tendues, phi_barre_mm,
                        duree_chargement="long_terme", Es=200_000.0,
-                       coeffs=None):
+                       coeffs=None, n_impose=None):
     """
     Calcule wk selon (7.8)-(7.14).
 
     nb_barres_tendues, phi_barre_mm : nombre et diamètre des barres de la
     nappe tendue sous M_ELS (utilisés pour φ et l'espacement).
     duree_chargement : "court_terme" (kt=0,6) ou "long_terme" (kt=0,4).
+    n_impose : coefficient d'équivalence n=Es/Ec forfaitaire (cf.
+    contraintes_ELS) ; None = calcul précis via Ecm(fck).
     """
     if coeffs is None:
         coeffs = COEFFS_RECOMMANDES
@@ -459,7 +628,7 @@ def ouverture_fissure(section, fck, M_ELS_kNm, nb_barres_tendues, phi_barre_mm,
     carac = caracteristiques_beton(fck)
     fct_eff = carac["fctm"]
 
-    els = contraintes_ELS(section, fck, M_ELS_kNm, Es=Es)
+    els = contraintes_ELS(section, fck, M_ELS_kNm, Es=Es, n_impose=n_impose)
     x = els["x"] ;  d = els["d"] ;  n_eq = els["n"]
     sigma_s = els["sigma_st"]
 
@@ -526,13 +695,19 @@ def justifier_flexion_simple(section, fck, fyk,
                               nb_barres_tendues, phi_barre_mm,
                               classe_exposition="XC1",
                               gamma_c=1.5, gamma_s=1.15,
-                              duree_chargement="long_terme"):
+                              duree_chargement="long_terme",
+                              n_impose=None):
     """
     Justification complète d'une section rectangulaire en flexion simple :
     moment réduit µ / besoin d'aciers comprimés, capacité ELU, état de
-    déformation ELU (diagramme), contraintes ELS, aciers minimaux
-    (ELU + ELS/fissuration), ouverture de fissure wk vs wmax(classe
-    d'exposition).
+    déformation ELU (diagramme), contraintes ELS, aciers théoriques et
+    minimaux (ELU + ELS/fissuration), ouverture de fissure wk vs
+    wmax(classe d'exposition).
+
+    n_impose : coefficient d'équivalence acier/béton n=Es/Ec à utiliser
+    pour les calculs ELS (contraintes, ouverture de fissure, As théorique
+    ELS). None (défaut) = calcul précis n=Es/Ecm(fck) ; une valeur
+    forfaitaire usuelle est n=15 (cf. cahier des charges).
 
     Retourne un dict structuré avec tous les résultats + verdicts booléens.
     """
@@ -541,6 +716,13 @@ def justifier_flexion_simple(section, fck, fyk,
     # --- Moment réduit / besoin d'aciers comprimés ---
     mr = moment_reduit(section, fck, fyk, M_ELU_kNm, gamma_c, gamma_s)
     resultats["moment_reduit"] = mr
+
+    # --- Acier théorique nécessaire à l'ELU (dimensionnement) ---
+    resultats["acier_theorique"] = acier_theorique_ELU(section, fck, fyk, M_ELU_kNm, gamma_c, gamma_s)
+
+    # --- Acier théorique nécessaire à l'ELS (dimensionnement, §7.2) ---
+    resultats["acier_theorique_ELS"] = acier_theorique_ELS(
+        section, fck, fyk, M_ELS_kNm, gamma_c, gamma_s, n_impose=n_impose)
 
     # --- État de déformation ELU (pour le diagramme) ---
     etat = etat_deformation_ELU(section, fck, fyk, gamma_c, gamma_s, M_ELU_kNm)
@@ -556,7 +738,7 @@ def justifier_flexion_simple(section, fck, fyk,
         detail=elu)
 
     # --- ELS : contraintes ---
-    els = contraintes_ELS(section, fck, M_ELS_kNm)
+    els = contraintes_ELS(section, fck, M_ELS_kNm, n_impose=n_impose)
     k1c = COEFFS_RECOMMANDES["k1_contrainte_beton"]
     k3s = COEFFS_RECOMMANDES["k3_contrainte_acier"]
     sigma_c_lim = k1c * fck
@@ -584,7 +766,8 @@ def justifier_flexion_simple(section, fck, fyk,
     # --- Ouverture de fissure ---
     wmax = WMAX_TABLE.get(classe_exposition, 0.3)
     fiss = ouverture_fissure(section, fck, M_ELS_kNm, nb_barres_tendues,
-                              phi_barre_mm, duree_chargement=duree_chargement)
+                              phi_barre_mm, duree_chargement=duree_chargement,
+                              n_impose=n_impose)
     resultats["fissuration"] = dict(
         wk=fiss["wk"], wmax=wmax, verifie=fiss["wk"] <= wmax,
         classe_exposition=classe_exposition, detail=fiss)
@@ -614,6 +797,14 @@ def imprimer_rapport(resultats):
     mr = resultats["moment_reduit"]
     print(f"\n[Moment réduit]  µ = {mr['mu']:.4f}   µlim = {mr['mu_lim']:.4f}"
           f"   {'✘ ACIERS COMPRIMÉS NÉCESSAIRES' if mr['besoin_aciers_comprimes'] else '✔ Section simplement armée suffisante'}")
+
+    at = resultats["acier_theorique"]
+    print(f"\n[Acier théorique nécessaire à l'ELU]  (dimensionnement, cas {at['cas']})")
+    print(f"  As théorique tendu = {at['As_theorique']*1e4:.2f} cm²")
+    if at["cas"] == "double":
+        print(f"    dont As1 (équilibre M_lim) = {at['As1']*1e4:.2f} cm², "
+              f"As2 (complément) = {at['As2']*1e4:.2f} cm²")
+        print(f"  As théorique comprimé       = {at['As_comprime_theorique']*1e4:.2f} cm²")
 
     etat = resultats["deformation_ELU"]
     if etat is not None:
@@ -994,3 +1185,132 @@ def schema_bloc_rectangulaire(section, fck, fyk, etat, gamma_c=1.5, gamma_s=1.15
     if nom_fichier:
         plt.savefig(nom_fichier, dpi=150, bbox_inches="tight")
     return fig
+
+
+# ═══════════════════════════════════════════════════════════════
+# 9.  RAPPORT PDF — entrants, sortants, figures, date
+# ═══════════════════════════════════════════════════════════════
+
+def generer_rapport_pdf(resultats, section, fck, fyk, M_ELS_kNm, gamma_c=1.5, gamma_s=1.15,
+                         geom_inf=None, geom_sup=None,
+                         nom_projet="", partie_ouvrage="",
+                         nom_fichier="rapport_flexion_simple_EC2.pdf"):
+    """
+    Génère un rapport PDF multi-pages : page de garde (projet, partie
+    d'ouvrage — optionnels, vides par défaut —, date, verdict), tableau
+    des hypothèses (entrants), tableau des résultats (sortants), puis
+    les figures (schéma de section détaillé, diagramme de déformation,
+    bloc rectangulaire équivalent).
+
+    geom_inf, geom_sup : dict renvoyés par geometrie_nappe() (celui qui
+    n'est pas None doit correspondre à la nappe réellement tendue —
+    passer None pour l'autre). Si aucun des deux n'est fourni, le schéma
+    de section détaillé est omis du rapport.
+
+    Retourne le chemin du fichier généré.
+    """
+    import matplotlib.pyplot as plt
+    from matplotlib.backends.backend_pdf import PdfPages
+    import datetime
+
+    if not nom_fichier.lower().endswith(".pdf"):
+        nom_fichier += ".pdf"
+
+    date_str = datetime.date.today().strftime("%d/%m/%Y")
+    b, h = section["b"], section["h"]
+    c_inf, c_sup = section["c_inf"], section["c_sup"]
+    As_inf, As_sup = section["As_inf"], section["As_sup"]
+
+    mr   = resultats["moment_reduit"]
+    at_u = resultats["acier_theorique"]
+    at_s = resultats["acier_theorique_ELS"]
+    elu  = resultats["ELU"]
+    els  = resultats["ELS_contraintes"]
+    amin = resultats["aciers_minimaux"]
+    fiss = resultats["fissuration"]
+
+    def tag(ok):
+        return "OK" if ok else "NON VERIFIE"
+
+    with PdfPages(nom_fichier) as pdf:
+        # ── Page 1 : garde + hypothèses + résultats ─────────────────────
+        fig1 = plt.figure(figsize=(8.27, 11.69), facecolor="white")
+        fig1.text(0.5, 0.965, "JUSTIFICATION À LA FLEXION SIMPLE",
+                   fontsize=16, fontweight="bold", ha="center")
+        fig1.text(0.5, 0.945, "Eurocode 2 (NF EN 1992-1-1 + Annexe Nationale française)",
+                   fontsize=10, ha="center", color="#555")
+
+        entete = (f"Projet            : {nom_projet if nom_projet else '—'}\n"
+                  f"Partie d'ouvrage  : {partie_ouvrage if partie_ouvrage else '—'}\n"
+                  f"Date              : {date_str}")
+        fig1.text(0.08, 0.905, entete, fontsize=9.5, family="monospace", va="top")
+
+        verdict_ok = resultats["verifie_global"]
+        fig1.text(0.08, 0.83,
+                  "✔  SECTION JUSTIFIÉE" if verdict_ok else "✘  SECTION NON JUSTIFIÉE",
+                  fontsize=13, fontweight="bold",
+                  color="#2E7D32" if verdict_ok else "#C62828")
+
+        hyp = (
+            f"BÉTON / ACIER\n"
+            f"  Classe béton                 fck = {fck:.0f} MPa\n"
+            f"  Acier                         fyk = {fyk:.0f} MPa\n"
+            f"  Coefficients partiels         γc = {gamma_c:.2f}   γs = {gamma_s:.2f}\n"
+            f"  Coeff. équivalence ELS        n = {els['detail']['n']:.2f}\n\n"
+            f"GÉOMÉTRIE\n"
+            f"  Section rectangulaire         b = {b*100:.0f} cm   h = {h*100:.0f} cm\n"
+            f"  Enrobages                     c_inf = {c_inf*1000:.0f} mm   c_sup = {c_sup*1000:.0f} mm\n\n"
+            f"FERRAILLAGE RÉEL\n"
+            f"  As_inf mis en place           {As_inf*1e4:.2f} cm²\n"
+            f"  As_sup mis en place           {As_sup*1e4:.2f} cm²\n\n"
+            f"SOLLICITATIONS\n"
+            f"  M_Ed ELU                      {elu['M_Ed']:.1f} kN·m\n"
+            f"  M_Ed ELS (comb. caract.)       {M_ELS_kNm:.1f} kN·m\n"
+            f"  Classe d'exposition            {fiss['classe_exposition']}"
+        )
+        fig1.text(0.08, 0.78, "ENTRANTS (hypothèses)", fontsize=11, fontweight="bold")
+        fig1.text(0.08, 0.755, hyp, fontsize=8.7, family="monospace", va="top", linespacing=1.5)
+
+        res_txt = (
+            f"MOMENT RÉDUIT\n"
+            f"  µ = {mr['mu']:.4f}    µlim = {mr['mu_lim']:.4f}\n"
+            f"  Aciers comprimés nécessaires : {'OUI' if mr['besoin_aciers_comprimes'] else 'NON'}\n\n"
+            f"ACIER THÉORIQUE (dimensionnement)\n"
+            f"  As théorique ELU               {at_u['As_theorique']*1e4:.2f} cm²  (cas {at_u['cas']})\n"
+            f"  As théorique ELS               {at_s['As_theorique_ELS']*1e4:.2f} cm²  "
+            f"(critère {at_s['critere_gouvernant']})\n\n"
+            f"ACIERS MINIMAUX RÉGLEMENTAIRES\n"
+            f"  As,min ELU (§9.2.1.1)          {amin['As_min_ELU']*1e4:.2f} cm²   [{tag(amin['verifie_ELU'])}]\n"
+            f"  As,min ELS (§7.3.2)            {amin['As_min_ELS']*1e4:.2f} cm²   [{tag(amin['verifie_ELS'])}]\n\n"
+            f"ELU — CAPACITÉ\n"
+            f"  M_Rd = {elu['M_Rd']:.1f} kN·m   taux = {elu['taux']*100:.1f} %   [{tag(elu['verifie'])}]\n\n"
+            f"ELS — CONTRAINTES (§7.2)\n"
+            f"  σc = {els['sigma_c']:.2f} MPa  (lim. {els['sigma_c_lim']:.2f})   [{tag(els['verifie_beton'])}]\n"
+            f"  σs = {els['sigma_s']:.1f} MPa  (lim. {els['sigma_s_lim']:.1f})   [{tag(els['verifie_acier'])}]\n\n"
+            f"OUVERTURE DE FISSURE (§7.3.4)\n"
+            f"  wk = {fiss['wk']:.3f} mm   (wmax = {fiss['wmax']:.2f} mm)   [{tag(fiss['verifie'])}]"
+        )
+        fig1.text(0.08, 0.44, "SORTANTS (résultats)", fontsize=11, fontweight="bold")
+        fig1.text(0.08, 0.415, res_txt, fontsize=8.7, family="monospace", va="top", linespacing=1.5)
+
+        fig1.text(0.5, 0.02, "Outil interne — vérifier avant utilisation en note de calcul.",
+                  fontsize=7.5, ha="center", color="#777", style="italic")
+        pdf.savefig(fig1) ;  plt.close(fig1)
+
+        # ── Page 2 : schéma de section détaillé ─────────────────────────
+        if geom_inf is not None or geom_sup is not None:
+            fig2 = schema_section_detaille(b, h, geom_inf=geom_inf, geom_sup=geom_sup)
+            fig2.suptitle("Schéma de section — ferraillage réel", fontsize=12, fontweight="bold")
+            pdf.savefig(fig2) ;  plt.close(fig2)
+
+        # ── Page 3 : diagramme de déformation + bloc équivalent ─────────
+        etat = resultats["deformation_ELU"]
+        if etat is not None:
+            fig3 = diagramme_deformation(section, etat)
+            pdf.savefig(fig3) ;  plt.close(fig3)
+
+            fig4 = schema_bloc_rectangulaire(section, fck, fyk, etat, gamma_c, gamma_s)
+            pdf.savefig(fig4) ;  plt.close(fig4)
+
+    print(f"  Rapport PDF sauvegardé : {nom_fichier}")
+    return nom_fichier

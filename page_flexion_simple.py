@@ -34,6 +34,15 @@ with st.sidebar:
     gamma_c = col_g1.number_input("γc", value=1.5, step=0.05, format="%.2f")
     gamma_s = col_g2.number_input("γs", value=1.15, step=0.05, format="%.2f")
 
+    n_auto = st.checkbox("Calculer n=Es/Ecm(fck) automatiquement", value=False,
+                          help="Décoché (défaut) : utilise la valeur forfaitaire n ci-dessous "
+                               "(usuellement 15). Coché : calcul précis à partir de Ecm(fck), "
+                               "variable selon la classe de béton.")
+    n_valeur = st.number_input("Coefficient d'équivalence n = Es/Ec", value=15.0, step=1.0,
+                                disabled=n_auto,
+                                help="Valeur forfaitaire usuelle : 15 (béton ordinaire).")
+    n_impose = None if n_auto else n_valeur
+
     st.header("2. Géométrie")
     col1, col2 = st.columns(2)
     b = col1.number_input("b [m]", value=0.30, step=0.05, min_value=0.05)
@@ -67,6 +76,10 @@ with st.sidebar:
                       format_func=lambda x: "Longue durée (kt=0,4)" if x == "long_terme"
                       else "Courte durée (kt=0,6)")
 
+    st.header("6. Rapport (optionnel)")
+    nom_projet = st.text_input("Projet", value="")
+    partie_ouvrage = st.text_input("Partie d'ouvrage", value="")
+
 # ═══════════════════════════════════════════════════════════════════════
 # CALCUL
 # ═══════════════════════════════════════════════════════════════════════
@@ -98,7 +111,8 @@ try:
         nb_barres_tendues=nb_barres_par_lit[0], phi_barre_mm=phi_barre,
         classe_exposition=classe_exposition,
         gamma_c=gamma_c, gamma_s=gamma_s,
-        duree_chargement=duree)
+        duree_chargement=duree,
+        n_impose=n_impose)
 except Exception as e:
     st.error(f"Erreur de calcul : {type(e).__name__} — {e}")
     st.stop()
@@ -111,14 +125,26 @@ if res["verifie_global"]:
 else:
     st.error("✘ Section NON justifiée — au moins un critère n'est pas satisfait", icon="⚠️")
 
-st.subheader("Sections d'acier minimales requises")
+st.subheader("Sections d'acier requises")
 a0 = res["aciers_minimaux"]
-col_a1, col_a2, col_a3 = st.columns(3)
-col_a1.metric("As,min ELU (§9.2.1.1)", f"{a0['As_min_ELU']*1e4:.2f} cm²")
-col_a2.metric("As,min ELS / fissuration (§7.3.2)", f"{a0['As_min_ELS']*1e4:.2f} cm²")
-col_a3.metric("As réel mis en place", f"{a0['As_tendu_reel']*1e4:.2f} cm²",
+at = res["acier_theorique"]
+at_els = res["acier_theorique_ELS"]
+col_a1, col_a2, col_a3, col_a4, col_a5 = st.columns(5)
+col_a1.metric("As théorique ELU", f"{at['As_theorique']*1e4:.2f} cm²")
+col_a2.metric("As théorique ELS", f"{at_els['As_theorique_ELS']*1e4:.2f} cm²")
+col_a3.metric("As,min ELU (§9.2.1.1)", f"{a0['As_min_ELU']*1e4:.2f} cm²")
+col_a4.metric("As,min ELS (§7.3.2)", f"{a0['As_min_ELS']*1e4:.2f} cm²")
+col_a5.metric("As réel mis en place", f"{a0['As_tendu_reel']*1e4:.2f} cm²",
               delta="✔ suffisant" if (a0["verifie_ELU"] and a0["verifie_ELS"]) else "✘ insuffisant",
               delta_color="normal" if (a0["verifie_ELU"] and a0["verifie_ELS"]) else "inverse")
+if at["cas"] == "double":
+    st.warning(f"Double armature ELU : As tendu = As1({at['As1']*1e4:.2f}) + "
+               f"As2({at['As2']*1e4:.2f}) = {at['As_theorique']*1e4:.2f} cm² — "
+               f"As comprimé théorique = {at['As_comprime_theorique']*1e4:.2f} cm²",
+               icon="⚠️")
+st.caption(f"As théorique = section nécessaire pour équilibrer exactement M_Ed (dimensionnement) "
+           f"— à distinguer des minima réglementaires, qui s'appliquent quel que soit M_Ed. "
+           f"Critère gouvernant l'As théorique ELS : {at_els['critere_gouvernant']}.")
 
 st.subheader("Moment réduit µ — besoin d'aciers comprimés")
 mr = res["moment_reduit"]
@@ -223,6 +249,21 @@ df = pd.DataFrame([
     ("sr,max", f"{res['fissuration']['detail']['sr_max']:.1f} mm"),
 ], columns=["Grandeur", "Valeur"])
 st.dataframe(df, hide_index=True, width="stretch")
+
+st.markdown("---")
+st.subheader("Export")
+import tempfile
+geom_inf_pdf = geom if positif else None
+geom_sup_pdf = geom if not positif else None
+with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+    fs.generer_rapport_pdf(
+        res, section, fck, fyk, M_ELS, gamma_c=gamma_c, gamma_s=gamma_s,
+        geom_inf=geom_inf_pdf, geom_sup=geom_sup_pdf,
+        nom_projet=nom_projet, partie_ouvrage=partie_ouvrage,
+        nom_fichier=tmp.name)
+    pdf_bytes = open(tmp.name, "rb").read()
+st.download_button("📄 Télécharger le rapport PDF", data=pdf_bytes,
+                    file_name="rapport_flexion_simple_EC2.pdf", mime="application/pdf")
 
 st.caption("Outil interne — vérifier les résultats avant utilisation en note de calcul. "
            "Valeurs conformes à la NF EN 1992-1-1/NA (mars 2007).")
