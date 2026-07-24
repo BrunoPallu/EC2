@@ -191,47 +191,30 @@ with col2:
     st.caption(f"Formule retenue : {f['detail']['formule']}")
 
 st.markdown("---")
-st.subheader("Schéma de section détaillé")
+st.subheader("Schéma ELU — section, déformations et bloc de contraintes (alignés)")
 geom_inf_plot = geom if positif else None
 geom_sup_plot = geom if not positif else None
-fig_sec = fs.schema_section_detaille(b, h, geom_inf=geom_inf_plot, geom_sup=geom_sup_plot)
-col_sec1, col_sec2 = st.columns([1.3, 1])
-with col_sec1:
-    st.pyplot(fig_sec, width="stretch")
-with col_sec2:
-    st.write(f"**{len([n for n in nb_barres_par_lit if n>0])} lit(s)** — Ø{phi_barre:.0f}mm")
-    for i, lit in enumerate(geom["lits"]):
-        st.write(f"Lit {i+1} : {lit['nb']} barres — à {lit['dist_parement']*1000:.0f}mm du parement")
-    st.write(f"Enrobage réel (lit 1) = **{geom['lits'][0]['dist_parement']*1000 - phi_barre/2:.0f} mm**"
-             if geom["lits"] else "—")
-    st.write(f"Bras de levier réel **d = {geom['d_eff']*1000:.1f} mm**")
-    st.caption("Le bras de levier tient compte du diamètre des barres, du nombre de lits "
-               "et de l'enrobage réel (centroïde pondéré des lits).")
 
-st.markdown("---")
-st.subheader("Diagramme de déformation à l'ELU")
 if res["deformation_ELU"] is not None:
-    col_diag, col_txt = st.columns([1.6, 1])
-    with col_diag:
-        fig = fs.diagramme_deformation(section, res["deformation_ELU"])
-        st.pyplot(fig, width="stretch")
-    with col_txt:
-        d = res["deformation_ELU"]
-        st.write(f"Axe neutre x = **{d['x']*1000:.1f} mm**")
-        st.write(f"εsup = **{d['eps_sup']*1e3:+.2f} ‰**")
-        st.write(f"εinf = **{d['eps_inf']*1e3:+.2f} ‰**")
-        st.caption("État à la ruine (pivot B), pas l'état sous M_Ed de service.")
-
-    st.subheader("Schéma classique — bloc de contraintes équivalent")
-    fig_bloc = fs.schema_bloc_rectangulaire(section, fck, fyk, res["deformation_ELU"],
-                                             gamma_c=gamma_c, gamma_s=gamma_s)
-    st.pyplot(fig_bloc, width="stretch")
-    st.caption("Diagramme des déformations (pivots A/B) et bloc rectangulaire équivalent "
-               "(λ, η — EC2 §3.1.7(3)), à titre de vérification croisée avec le calcul exact "
-               "parabole-rectangle ci-dessus (Mu du bloc ≈ M_Rd exact à moins de 1% près).")
+    fig_complet = fs.schema_ELU_complet(section, fck, fyk, res["deformation_ELU"],
+                                         gamma_c=gamma_c, gamma_s=gamma_s,
+                                         geom_inf=geom_inf_plot, geom_sup=geom_sup_plot)
+    st.pyplot(fig_complet, width="stretch")
+    d = res["deformation_ELU"]
+    col_i1, col_i2, col_i3 = st.columns(3)
+    col_i1.metric("Axe neutre x", f"{d['x']*1000:.1f} mm")
+    col_i2.metric("εsup", f"{d['eps_sup']*1e3:+.2f} ‰")
+    col_i3.metric("εinf", f"{d['eps_inf']*1e3:+.2f} ‰")
+    st.caption("Les 3 panneaux partagent la même échelle verticale : fibre supérieure, fibre "
+               "inférieure et barycentre réel des aciers tendus sont à la même hauteur sur "
+               "les 3 panneaux (repères horizontaux pointillés). État affiché à la ruine "
+               "(pivot B, M=M_Rd) — pas l'état sous M_Ed de service. Le bras de levier tient "
+               "compte du diamètre des barres, du nombre de lits et de l'enrobage réel.")
 else:
-    st.info("Pivot A probable (section très peu armée) — diagramme non calculé pour ce cas.",
-            icon="ℹ️")
+    st.info("Pivot A probable (section très peu armée) — schéma non calculé pour ce cas ; "
+            "affichage de la section seule.", icon="ℹ️")
+    fig_sec = fs.schema_section_detaille(b, h, geom_inf=geom_inf_plot, geom_sup=geom_sup_plot)
+    st.pyplot(fig_sec, width="stretch")
 
 st.markdown("---")
 st.subheader("Détail des résultats")

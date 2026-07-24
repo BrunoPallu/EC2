@@ -1068,8 +1068,17 @@ def schema_bloc_rectangulaire(section, fck, fyk, etat, gamma_c=1.5, gamma_s=1.15
     positif = etat["positif"]
     d = (h - c_inf) if positif else (h - c_sup)
     x = etat["x"]
-    eps_c = etat["eps_top"] if positif else etat["eps_bot"]
-    eps_s = etat["eps_bot"] if positif else etat["eps_top"]
+    eps_top_extreme = etat["eps_top"]
+    eps_bot_extreme = etat["eps_bot"]
+
+    # Déformation réelle AU NIVEAU DE L'ACIER TENDU (pas à la fibre béton
+    # extrême !) — interpolation linéaire du champ de déformation à la
+    # position y réelle de la nappe tendue. C'est ce qui pilote σs/Fs.
+    def _eps_a(y):
+        return eps_top_extreme + (eps_bot_extreme - eps_top_extreme) * (h / 2 - y) / h
+
+    y_acier_t = (-h / 2 + c_inf) if positif else (h / 2 - c_sup)
+    eps_s = _eps_a(y_acier_t)
 
     lx = lam * x
     z = d - lx / 2.0
@@ -1116,19 +1125,27 @@ def schema_bloc_rectangulaire(section, fck, fyk, etat, gamma_c=1.5, gamma_s=1.15
     ax_def.text(-0.10, (y_top+y_x)/2, "x", fontsize=11, ha="right", va="center",
                 style="italic", color="#2E7D32")
 
-    eps_max = max(abs(eps_c), abs(eps_s), 1e-6)
+    # Position du point A (acier tendu) dans le repère section (0=bas)
+    y_A_S = (y_acier_t + h / 2.0) * sc
+
+    eps_max = max(abs(eps_top_extreme), abs(eps_bot_extreme), abs(eps_s), 1e-6)
     e_axis_h = 0.9
     def e_to_x(eps):
         return eps / eps_max * e_axis_h
 
     ax_def.axvline(0, color="#666", lw=0.8)
-    ax_def.plot([e_to_x(eps_c), e_to_x(eps_s)], [y_top, y_bot], color="#1565C0", lw=2.2)
-    ax_def.plot(e_to_x(eps_c), y_top, "o", color="#1565C0", ms=6)
-    ax_def.plot(e_to_x(eps_s), y_bot, "o", color="#1565C0", ms=6)
-    ax_def.text(e_to_x(eps_c)+0.05, y_top, f"B\nεc={eps_c*1e3:.2f}‰",
+    # Droite complète = profil RÉEL sur toute la hauteur (fibres béton extrêmes)
+    ax_def.plot([e_to_x(eps_top_extreme), e_to_x(eps_bot_extreme)], [y_top, y_bot],
+                color="#90A4AE", lw=1.4, ls="--", zorder=2)
+    ax_def.plot(e_to_x(eps_top_extreme), y_top, "o", color="#1565C0", ms=6, zorder=4)
+    ax_def.text(e_to_x(eps_top_extreme)+0.05, y_top, f"B (béton)\nεc={eps_top_extreme*1e3:.2f}‰",
                 fontsize=9, color="#1565C0", va="center")
-    ax_def.text(e_to_x(eps_s)+0.05, y_bot, f"A\nεs={eps_s*1e3:.2f}‰",
-                fontsize=9, color="#1565C0", va="center")
+    ax_def.text(e_to_x(eps_bot_extreme)+0.05, y_bot, f"béton, bord\nε={eps_bot_extreme*1e3:.2f}‰",
+                fontsize=7.5, color="#90A4AE", va="center")
+    # Point A = acier tendu, à SA position réelle (pas au bord du béton)
+    ax_def.plot(e_to_x(eps_s), y_A_S, "o", color="#C62828", ms=7, zorder=5)
+    ax_def.text(e_to_x(eps_s)+0.05, y_A_S, f"A (acier)\nεs={eps_s*1e3:.2f}‰",
+                fontsize=9, color="#C62828", va="center", fontweight="bold")
     ax_def.annotate("", xy=(e_axis_h+0.15, hS/2), xytext=(-e_axis_h-0.15, hS/2),
                      arrowprops=dict(arrowstyle="->", color="#333", lw=1))
     ax_def.text(e_axis_h+0.20, hS/2, "ε", fontsize=11, style="italic", va="center")
@@ -1182,6 +1199,203 @@ def schema_bloc_rectangulaire(section, fck, fyk, etat, gamma_c=1.5, gamma_s=1.15
                  f" — x={x*1000:.0f}mm, λ={lam:.3f}, η={eta:.3f}",
                  fontsize=10.5, fontweight="bold", y=1.02)
     plt.tight_layout()
+    if nom_fichier:
+        plt.savefig(nom_fichier, dpi=150, bbox_inches="tight")
+    return fig
+
+
+def schema_ELU_complet(section, fck, fyk, etat, gamma_c=1.5, gamma_s=1.15,
+                        geom_inf=None, geom_sup=None, nom_fichier=None):
+    """
+    Figure UNIQUE (format A3 paysage) réunissant les 3 panneaux : section
+    (ferraillage réel par lits), diagramme des déformations (pivots A/B),
+    bloc de contraintes équivalent (Fc, Fs, z, Mu) — remplace l'usage
+    combiné de diagramme_deformation() + schema_bloc_rectangulaire().
+
+    Les 3 panneaux partagent EXACTEMENT la même échelle et les mêmes
+    limites verticales : la fibre supérieure, la fibre inférieure et le
+    barycentre réel des aciers tendus sont donc rigoureusement à la même
+    hauteur d'un panneau à l'autre (lignes de repère horizontales
+    tracées sur les 3 panneaux).
+
+    geom_inf, geom_sup : dict renvoyés par geometrie_nappe() (celui qui
+    n'est pas None doit correspondre à la nappe réellement tendue). Si
+    aucun n'est fourni, une seule barre schématique est dessinée.
+
+    Retourne la figure matplotlib (fig).
+    """
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as mpatches
+
+    b, h = section["b"], section["h"]
+    c_inf, c_sup = section["c_inf"], section["c_sup"]
+    As_inf, As_sup = section["As_inf"], section["As_sup"]
+
+    mat = ec2.get_material_params(fck, fyk, gamma_c, gamma_s)
+    fcd = mat["fcd"]
+    lam, eta = lambda_eta_EC2(fck)
+
+    positif = etat["positif"]
+    d = (h - c_inf) if positif else (h - c_sup)
+    x = etat["x"]
+    eps_top_extreme = etat["eps_top"]
+    eps_bot_extreme = etat["eps_bot"]
+
+    def _eps_a(y):
+        return eps_top_extreme + (eps_bot_extreme - eps_top_extreme) * (h / 2 - y) / h
+
+    y_acier_t = (-h / 2 + c_inf) if positif else (h / 2 - c_sup)
+    eps_s = _eps_a(y_acier_t)
+
+    lx = lam * x
+    z = d - lx / 2.0
+    Fc = eta * fcd * 1e3 * lx * b
+    As_t = As_inf if positif else As_sup
+    fyd = mat["fyd"]
+    sigma_s = ec2.sigma_s(abs(eps_s), mat) if As_t > 0 else fyd
+    Fs = As_t * sigma_s * 1e3
+    Mu = Fc * z
+
+    # ── Échelle et limites COMMUNES aux 3 panneaux ──────────────────────
+    sc = 1.0 / h
+    bS, hS = b * sc, h * sc
+    y_top, y_bot = hS, 0.0
+    y_acier_S = (y_acier_t + h / 2.0) * sc      # barycentre acier tendu, repère bas=0
+    YLIM = (-0.32, hS + 0.28)                   # IDENTIQUE sur les 3 panneaux
+
+    geom_tendu = geom_inf if positif else geom_sup
+
+    # A3 paysage : 420 x 297 mm = 16,54 x 11,69 pouces
+    fig, (ax_sec, ax_def, ax_bloc) = plt.subplots(
+        1, 3, figsize=(16.54, 11.69),
+        gridspec_kw={"width_ratios": [0.9, 1.0, 1.3]})
+
+    COL_REF = "#B0BEC5"
+
+    def _lignes_reperes(ax):
+        """Repères horizontaux communs : fibre sup, fibre inf, barycentre acier."""
+        for y in (y_top, y_bot, y_acier_S):
+            ax.axhline(y, color=COL_REF, lw=0.9, ls=(0, (5, 4)), zorder=1)
+
+    # ══════════════════════════ Panneau 1 : Section ════════════════════
+    ax_sec.add_patch(mpatches.Rectangle((-bS/2, 0), bS, hS,
+                                         fc="#eef1f7", ec="#333", lw=1.6, zorder=3))
+    _lignes_reperes(ax_sec)
+
+    if geom_tendu is not None and geom_tendu["As_total"] > 0:
+        for i, lit in enumerate(geom_tendu["lits"]):
+            y_S = (lit["y"] + h/2) * sc
+            r_b = 0.018 + 0.0035 * lit["phi_mm"] / 12.0
+            nb = lit["nb"]
+            marge = bS * 0.08
+            xs = np.linspace(-bS/2 + marge, bS/2 - marge, nb) if nb > 1 else [0.0]
+            for xb in xs:
+                ax_sec.add_patch(plt.Circle((xb, y_S), r_b, color="#b71c1c", zorder=5))
+            ax_sec.annotate(f"Lit {i+1} : {nb}HA{int(lit['phi_mm'])}",
+                            (bS/2 + marge, y_S), xytext=(bS/2 + 0.10, y_S),
+                            fontsize=9, va="center", ha="left", color="#7a1414")
+        if len(geom_tendu["lits"]) > 1:
+            ax_sec.plot(0, y_acier_S, "+", color="#1565C0", ms=14, mew=2.2, zorder=6)
+    else:
+        y_acier_dot = c_inf * sc if positif else (h - c_sup) * sc
+        ax_sec.add_patch(mpatches.Rectangle((-bS/2*0.55, y_acier_dot - 0.012), bS*0.55, 0.024,
+                                             fc="#334", ec="none", zorder=5))
+
+    ax_sec.annotate("", xy=(-bS/2-0.10, y_top), xytext=(-bS/2-0.10, y_acier_S),
+                     arrowprops=dict(arrowstyle="<->", color="#1565C0", lw=1.2))
+    ax_sec.text(-bS/2-0.14, (y_top+y_acier_S)/2, "d", fontsize=13, ha="right",
+                va="center", style="italic", color="#1565C0", fontweight="bold")
+    ax_sec.annotate("", xy=(-bS/2, -0.10), xytext=(bS/2, -0.10),
+                     arrowprops=dict(arrowstyle="<->", color="#333", lw=1))
+    ax_sec.text(0, -0.16, f"b={b*100:.0f}cm", ha="center", fontsize=10)
+    ax_sec.annotate("", xy=(bS/2+0.12, 0), xytext=(bS/2+0.12, hS),
+                     arrowprops=dict(arrowstyle="<->", color="#333", lw=1))
+    ax_sec.text(bS/2+0.17, hS/2, f"h={h*100:.0f}cm", fontsize=10, va="center", rotation=90)
+    ax_sec.text(bS/2+0.05, y_top, "fibre sup.", fontsize=8, color="#78909C", va="bottom")
+    ax_sec.text(bS/2+0.05, y_bot, "fibre inf.", fontsize=8, color="#78909C", va="top")
+
+    ax_sec.set_xlim(-bS/2 - 0.8, bS/2 + 1.6) ;  ax_sec.set_ylim(*YLIM)
+    ax_sec.set_aspect("equal") ;  ax_sec.axis("off")
+    ax_sec.set_title("Section — ferraillage réel", fontsize=13, fontweight="bold")
+
+    # ══════════════════ Panneau 2 : Diagramme des déformations ═════════
+    _lignes_reperes(ax_def)
+    y_x = hS - x * sc if positif else x * sc
+    ax_def.axhline(y_x, color="#999", lw=0.9, ls=(0, (4, 3)), zorder=2)
+    ax_def.annotate("", xy=(0, y_top), xytext=(0, y_x),
+                     arrowprops=dict(arrowstyle="<->", color="#2E7D32", lw=1.2))
+    ax_def.text(-0.10, (y_top+y_x)/2, "x", fontsize=13, ha="right", va="center",
+                style="italic", color="#2E7D32", fontweight="bold")
+
+    eps_max = max(abs(eps_top_extreme), abs(eps_bot_extreme), abs(eps_s), 1e-6)
+    e_axis_h = 0.9
+    def e_to_x(eps):
+        return eps / eps_max * e_axis_h
+
+    ax_def.axvline(0, color="#666", lw=0.8, zorder=2)
+    ax_def.plot([e_to_x(eps_top_extreme), e_to_x(eps_bot_extreme)], [y_top, y_bot],
+                color="#90A4AE", lw=1.4, ls="--", zorder=3)
+    ax_def.plot(e_to_x(eps_top_extreme), y_top, "o", color="#1565C0", ms=8, zorder=5)
+    ax_def.text(e_to_x(eps_top_extreme)+0.05, y_top, f"B (béton)\nεc={eps_top_extreme*1e3:.2f}‰",
+                fontsize=10.5, color="#1565C0", va="center")
+    ax_def.text(e_to_x(eps_bot_extreme)+0.05, y_bot, f"béton, bord\nε={eps_bot_extreme*1e3:.2f}‰",
+                fontsize=8.5, color="#90A4AE", va="center")
+    ax_def.plot(e_to_x(eps_s), y_acier_S, "o", color="#C62828", ms=8, zorder=6)
+    ax_def.text(e_to_x(eps_s)+0.05, y_acier_S, f"A (acier)\nεs={eps_s*1e3:.2f}‰",
+                fontsize=10.5, color="#C62828", va="center", fontweight="bold")
+    ax_def.annotate("", xy=(e_axis_h+0.15, hS/2), xytext=(-e_axis_h-0.15, hS/2),
+                     arrowprops=dict(arrowstyle="->", color="#333", lw=1))
+    ax_def.text(e_axis_h+0.20, hS/2, "ε", fontsize=13, style="italic", va="center")
+    ax_def.annotate("", xy=(0, y_top+0.14), xytext=(0, y_bot-0.02),
+                     arrowprops=dict(arrowstyle="->", color="#333", lw=1))
+    ax_def.text(0.03, y_top+0.16, "y", fontsize=13, style="italic")
+    ax_def.set_xlim(-e_axis_h-0.35, e_axis_h+0.5) ;  ax_def.set_ylim(*YLIM)
+    ax_def.axis("off")
+    ax_def.set_title("Diagramme des déformations", fontsize=13, fontweight="bold")
+
+    # ══════════════════ Panneau 3 : Bloc rectangulaire équivalent ══════
+    _lignes_reperes(ax_bloc)
+    lxS = lam * x * sc
+    ax_bloc.add_patch(mpatches.Rectangle((0.05, hS - lxS), 0.35, lxS,
+                                          fc="none", ec="#333", lw=1.4, zorder=4))
+    ax_bloc.text(0.225, hS + 0.06, f"σc=η.fcd={eta*fcd:.1f} MPa",
+                 fontsize=9.5, ha="center")
+    ax_bloc.annotate("", xy=(0.42, hS), xytext=(0.42, hS - lxS),
+                      arrowprops=dict(arrowstyle="<->", color="#2E7D32", lw=1.1))
+    ax_bloc.text(0.46, hS - lxS/2, f"λ.x\n={lx*1000:.0f}mm", fontsize=9,
+                 color="#2E7D32", va="center")
+
+    y_Fc = hS - lxS/2
+    ax_bloc.annotate("", xy=(0.05, y_Fc), xytext=(-0.15, y_Fc),
+                      arrowprops=dict(arrowstyle="<-", color="#C62828", lw=2.2))
+    ax_bloc.text(-0.18, y_Fc, f"Fc={Fc:.0f}kN", fontsize=10, color="#C62828",
+                 ha="right", va="center", fontweight="bold")
+
+    ax_bloc.plot([0.05, 0.40], [y_acier_S, y_acier_S], color="#334", lw=3, zorder=4)
+    ax_bloc.annotate("", xy=(0.55, y_acier_S), xytext=(0.05, y_acier_S),
+                      arrowprops=dict(arrowstyle="->", color="#C62828", lw=2.2))
+    ax_bloc.text(0.58, y_acier_S, f"Fs={Fs:.0f}kN\n(σs={sigma_s:.0f}MPa)",
+                 fontsize=9.5, color="#C62828", va="center", fontweight="bold")
+
+    ax_bloc.annotate("", xy=(0.85, y_Fc), xytext=(0.85, y_acier_S),
+                      arrowprops=dict(arrowstyle="<->", color="#333", lw=1.1))
+    ax_bloc.text(0.90, (y_Fc+y_acier_S)/2, f"z={z*1000:.0f}mm", fontsize=10,
+                 va="center", style="italic")
+
+    ax_bloc.annotate("", xy=(0.20, y_acier_S - 0.09), xytext=(0.30, y_acier_S - 0.09),
+                      arrowprops=dict(arrowstyle="->", color="#7B1FA2", lw=2.0,
+                                       connectionstyle="arc3,rad=0.6"))
+    ax_bloc.text(0.25, y_acier_S - 0.18, f"Mu={Mu:.0f} kN·m", fontsize=10.5,
+                 color="#7B1FA2", ha="center", fontweight="bold")
+
+    ax_bloc.set_xlim(-0.55, 1.15) ;  ax_bloc.set_ylim(*YLIM)
+    ax_bloc.axis("off")
+    ax_bloc.set_title("Bloc de contraintes équivalent", fontsize=13, fontweight="bold")
+
+    fig.suptitle(f"Justification ELU flexion simple — pivot {'B' if positif else 'B (mirroir)'}"
+                 f" — x={x*1000:.0f}mm, λ={lam:.3f}, η={eta:.3f}",
+                 fontsize=14, fontweight="bold", y=0.99)
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
     if nom_fichier:
         plt.savefig(nom_fichier, dpi=150, bbox_inches="tight")
     return fig
@@ -1297,20 +1511,17 @@ def generer_rapport_pdf(resultats, section, fck, fyk, M_ELS_kNm, gamma_c=1.5, ga
                   fontsize=7.5, ha="center", color="#777", style="italic")
         pdf.savefig(fig1) ;  plt.close(fig1)
 
-        # ── Page 2 : schéma de section détaillé ─────────────────────────
-        if geom_inf is not None or geom_sup is not None:
+        # ── Page 2 : schéma ELU complet, fusionné (section + déformation + bloc) ──
+        etat = resultats["deformation_ELU"]
+        if etat is not None:
+            fig2 = schema_ELU_complet(section, fck, fyk, etat, gamma_c, gamma_s,
+                                      geom_inf=geom_inf, geom_sup=geom_sup)
+            pdf.savefig(fig2) ;  plt.close(fig2)
+        elif geom_inf is not None or geom_sup is not None:
+            # Pivot A probable : pas d'état ELU calculé -> schéma de section seul
             fig2 = schema_section_detaille(b, h, geom_inf=geom_inf, geom_sup=geom_sup)
             fig2.suptitle("Schéma de section — ferraillage réel", fontsize=12, fontweight="bold")
             pdf.savefig(fig2) ;  plt.close(fig2)
-
-        # ── Page 3 : diagramme de déformation + bloc équivalent ─────────
-        etat = resultats["deformation_ELU"]
-        if etat is not None:
-            fig3 = diagramme_deformation(section, etat)
-            pdf.savefig(fig3) ;  plt.close(fig3)
-
-            fig4 = schema_bloc_rectangulaire(section, fck, fyk, etat, gamma_c, gamma_s)
-            pdf.savefig(fig4) ;  plt.close(fig4)
 
     print(f"  Rapport PDF sauvegardé : {nom_fichier}")
     return nom_fichier
