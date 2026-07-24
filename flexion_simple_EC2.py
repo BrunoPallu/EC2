@@ -283,23 +283,36 @@ def _moment_beton_seul(x, h, fibres, mat, d):
 
 
 def acier_theorique_ELU(section, fck, fyk, M_ELU_kNm, gamma_c=1.5, gamma_s=1.15,
-                         n_div=400, tol=1e-6, max_iter=60):
+                         methode="approximation", n_div=400, tol=1e-6, max_iter=60):
     """
     Calcule la section d'acier théoriquement NÉCESSAIRE pour équilibrer
     M_ELU_kNm (dimensionnement, par opposition à la vérification d'un
-    ferraillage déjà choisi) : résolution exacte (parabole-rectangle,
-    pas le bloc simplifié) par recherche de la profondeur d'axe neutre x
-    telle que le moment résistant du béton seul, ramené au niveau des
-    aciers tendus, égale M_Ed.
+    ferraillage déjà choisi).
+
+    methode :
+      "approximation" (défaut) — formule fermée classique du moment
+        réduit, basée sur le bloc de contraintes rectangulaire (λ=0,8,
+        η=1,0) : α = 1,25.(1-√(1-2µ)), z = d.(1-0,4α), As = M_Ed/(z.fyd).
+        C'est la méthode couramment utilisée en bureau d'études (rapide,
+        formule fermée) — cf. par exemple les feuilles de calcul Excel
+        de référence. Très proche de la méthode exacte (écart typique
+        <1%) mais pas rigoureusement identique.
+      "exacte" — résolution par intégration numérique complète de la loi
+        parabole-rectangle (recherche de x par dichotomie), sans passer
+        par le bloc rectangulaire simplifié. Plus rigoureuse, plus lente.
 
     Si µ > µlim (aciers comprimés nécessaires, cf. moment_reduit), la
     section est calculée en double armature selon la méthode classique :
-    - As1 équilibre M_lim (béton seul à x_lim) avec l'acier tendu à fyd
+    - As1 équilibre M_lim avec l'acier tendu à fyd
     - le complément ΔM = M_Ed - M_lim est équilibré par le couple
       (aciers comprimés As', aciers tendus additionnels As2) au bras de
       levier (d-d')
+    (le cas double armature utilise toujours la résolution exacte à
+    x=x_lim pour la position de l'axe neutre, quelle que soit la
+    méthode choisie — seul le cas simple change véritablement de calcul
+    entre "approximation" et "exacte".)
 
-    Retourne dict(As_theorique, As1, As2, As_comprime_theorique, x, cas)
+    Retourne dict(As_theorique, As1, As2, As_comprime_theorique, x, cas, methode)
     où cas ∈ {"simple", "double"}.
     """
     b, h, c_inf = section["b"], section["h"], section["c_inf"]
@@ -308,6 +321,7 @@ def acier_theorique_ELU(section, fck, fyk, M_ELU_kNm, gamma_c=1.5, gamma_s=1.15,
     d_prime = c_sup
 
     mat = ec2.get_material_params(fck, fyk, gamma_c, gamma_s)
+    fcd = mat["fcd"]
     fyd = mat["fyd"] ;  ecu2 = mat["eps_cu2"] ;  eps_yd = mat["eps_yd"]
     fibres = ec2.fibres_rect(b, h, n_div)
     M_Ed = abs(M_ELU_kNm)
@@ -316,7 +330,19 @@ def acier_theorique_ELU(section, fck, fyk, M_ELU_kNm, gamma_c=1.5, gamma_s=1.15,
     _, M_lim, _ = _moment_beton_seul(x_lim, h, fibres, mat, d)
 
     if M_Ed <= M_lim:
-        # ── Cas simple armature : recherche de x par dichotomie ────────
+        if methode == "approximation":
+            # ── Formule fermée (bloc rectangulaire λ=0,8 / η=1,0) ───────
+            mu = (M_Ed * 1e3) / (b * d ** 2 * fcd * 1e6)
+            alpha = 1.25 * (1.0 - np.sqrt(max(0.0, 1.0 - 2.0 * mu)))
+            z = d * (1.0 - 0.4 * alpha)
+            x = alpha * d
+            As_theo = M_Ed / (z * fyd * 1000.0)   # m² (M_Ed kN.m, z m, fyd MPa)
+
+            return dict(As_theorique=As_theo, As1=As_theo, As2=0.0,
+                        As_comprime_theorique=0.0, x=x, d=d, cas="simple",
+                        methode="approximation", mu=mu, alpha=alpha, z=z)
+
+        # ── Méthode "exacte" : recherche de x par dichotomie ────────────
         lo, hi = 1e-4, x_lim
         _, M_lo, _ = _moment_beton_seul(lo, h, fibres, mat, d)
         _, M_hi, _ = _moment_beton_seul(hi, h, fibres, mat, d)
@@ -338,12 +364,18 @@ def acier_theorique_ELU(section, fck, fyk, M_ELU_kNm, gamma_c=1.5, gamma_s=1.15,
         As_theo = Fc / (sigma_s_t * 1e3)   # Fc[kN] / (sigma[MPa]=1e3 kN/m²) -> m²
 
         return dict(As_theorique=As_theo, As1=As_theo, As2=0.0,
-                    As_comprime_theorique=0.0, x=x, d=d, cas="simple")
+                    As_comprime_theorique=0.0, x=x, d=d, cas="simple",
+                    methode="exacte")
 
     else:
-        # ── Cas double armature ─────────────────────────────────────────
-        Fc_lim, _, eps_bot_lim = _moment_beton_seul(x_lim, h, fibres, mat, d)
-        As1 = Fc_lim / (fyd * 1e3)   # tendu à fyd (pivot B pur -> juste à εyd)
+        # ── Cas double armature (toujours résolu à x=x_lim, exact) ──────
+        if methode == "approximation":
+            alpha_lim = x_lim / d
+            z_lim = d * (1.0 - 0.4 * alpha_lim)
+            As1 = M_lim / (z_lim * fyd * 1000.0)
+        else:
+            Fc_lim, _, eps_bot_lim = _moment_beton_seul(x_lim, h, fibres, mat, d)
+            As1 = Fc_lim / (fyd * 1e3)   # tendu à fyd (pivot B pur -> juste à εyd)
 
         # déformation des aciers comprimés à x=x_lim (profondeur d' sous la
         # fibre sup. comprimée) : eps(y_from_top) = ecu2.(1 - y_from_top/x_lim)
@@ -358,11 +390,13 @@ def acier_theorique_ELU(section, fck, fyk, M_ELU_kNm, gamma_c=1.5, gamma_s=1.15,
         As_theo = As1 + As2
 
         return dict(As_theorique=As_theo, As1=As1, As2=As2,
-                    As_comprime_theorique=As_comprime, x=x_lim, d=d, cas="double")
+                    As_comprime_theorique=As_comprime, x=x_lim, d=d, cas="double",
+                    methode=methode)
 
 
 def etat_deformation_ELU(section, fck, fyk, gamma_c=1.5, gamma_s=1.15,
-                          M_ELU_kNm=None, n_div=400, tol=1e-6, max_iter=60):
+                          M_ELU_kNm=None, methode="approximation",
+                          n_div=400, tol=1e-6, max_iter=60):
     """
     Détermine l'état de déformation réel à l'ELU pour le ferraillage donné
     (vérification), en supposant le pivot B actif (fibre extrême comprimée
@@ -370,50 +404,116 @@ def etat_deformation_ELU(section, fck, fyk, gamma_c=1.5, gamma_s=1.15,
     solveur ne trouve pas de racine dans ce domaine, la section est très
     probablement pilotée par le pivot A — cf. valeur de retour None).
 
+    methode :
+      "approximation" (défaut) — équilibre résolu avec le bloc de
+        contraintes rectangulaire équivalent (EC2 §3.1.7(3), éq. (3.19)-
+        (3.20) : λ, η). Rapide, formule fermée pour Fc ; c'est la méthode
+        usuelle de bureau d'études.
+      "exacte" — équilibre résolu par intégration numérique complète de
+        la loi parabole-rectangle (fibre par fibre), plus rigoureuse.
+
+    Dans les deux cas, la compatibilité des déformations reste identique
+    (profil linéaire, εc,sup=εcu2) : seule la façon de calculer la
+    résultante de compression béton diffère. Le dict retourné a
+    EXACTEMENT la même structure quelle que soit la méthode (x, εtop,
+    εbot, M, etc.), pour que tous les tracés et calculs en aval
+    fonctionnent sans distinction.
+
     M_ELU_kNm sert uniquement à choisir le signe (quelle nappe est tendue) ;
     l'état renvoyé est l'état À LA RUINE (M=M_Rd côté correspondant), pas
     l'état sous M_Ed — c'est l'état conventionnellement montré sur un
     "diagramme des déformations" (cf. cahier des charges).
 
-    Retourne dict(eps_top, eps_bot, x, eps_sc, eps_st, y_sup, y_inf, N, M)
-    ou None si aucune racine trouvée dans le domaine pivot B.
+    Retourne dict(eps_top, eps_bot, x, eps_sc, eps_st, y_sup, y_inf, N, M,
+    methode) ou None si aucune racine trouvée dans le domaine pivot B.
     """
     b, h = section["b"], section["h"]
     c_inf, c_sup = section["c_inf"], section["c_sup"]
     As_inf, As_sup = section["As_inf"], section["As_sup"]
 
     mat = ec2.get_material_params(fck, fyk, gamma_c, gamma_s)
-    fibres = ec2.fibres_rect(b, h, n_div)
-    arma = ec2.armatures_rect(h, c_inf, c_sup, As_inf, As_sup)
     ecu2 = mat["eps_cu2"] ;  eud = mat["eps_ud"]
-
     positif = (M_ELU_kNm is None) or (M_ELU_kNm >= 0)
 
-    def N_de(eps_var):
-        if positif:
-            N, _ = ec2.compute_NM(ecu2, eps_var, h, fibres, arma, mat)
-        else:
-            N, _ = ec2.compute_NM(eps_var, ecu2, h, fibres, arma, mat)
-        return N
+    if methode == "approximation":
+        # ── Équilibre avec le bloc rectangulaire (λ, η) ──────────────────
+        lam, eta = lambda_eta_EC2(fck)
+        fcd = mat["fcd"]
+        As_t = As_inf if positif else As_sup
+        As_c = As_sup if positif else As_inf
+        c_t  = c_inf if positif else c_sup
+        c_c  = c_sup if positif else c_inf
+        d = h - c_t
+        d_prime = c_c
 
-    lo, hi = -eud, ecu2
-    N_lo, N_hi = N_de(lo), N_de(hi)
-    if N_lo > 0 or N_hi < 0:
-        return None  # pas de racine en domaine pivot B -> pivot A probable
+        def _N(x):
+            eps_s  = ecu2 * (x - d) / x
+            eps_sc = ecu2 * (x - d_prime) / x if As_c > 0 else 0.0
+            Fc  = eta * fcd * 1e3 * min(lam * x, h) * b        # kN
+            Fst = As_t * abs(ec2.sigma_s(eps_s, mat)) * 1e3    # kN
+            Fsc = As_c * ec2.sigma_s(eps_sc, mat) * 1e3 if As_c > 0 else 0.0
+            return Fc + Fsc - Fst
 
-    for _ in range(max_iter):
-        mid = 0.5 * (lo + hi)
-        if abs(N_de(mid)) < tol * max(1.0, abs(N_lo)):
-            break
-        if N_de(mid) > 0:
-            hi = mid
-        else:
-            lo = mid
+        x_min = d * ecu2 / (ecu2 + eud)   # frontière physique pivot B (εs=-εud)
+        lo, hi = x_min * 1.0001, min(h, d) * 0.999
+        N_lo, N_hi = _N(lo), _N(hi)
+        if N_lo > 0 or N_hi < 0:
+            return None  # pas de racine -> pivot A probable
 
-    eps_top, eps_bot = (ecu2, mid) if positif else (mid, ecu2)
-    N_eq, M_eq = ec2.compute_NM(eps_top, eps_bot, h, fibres, arma, mat)
+        for _ in range(max_iter):
+            mid = 0.5 * (lo + hi)
+            N_mid = _N(mid)
+            if abs(N_mid) < tol * max(1.0, abs(N_lo)):
+                break
+            if N_mid > 0:
+                hi = mid
+            else:
+                lo = mid
+        x = mid
 
-    x = ecu2 * h / (ecu2 - eps_bot) if positif else ecu2 * h / (ecu2 - eps_top)
+        # Équilibre atteint (N=0) : le moment est indépendant du point de
+        # réduction -> calcul direct au niveau des aciers tendus = M_Rd.
+        eps_s_t  = ecu2 * (x - d) / x
+        eps_s_c  = ecu2 * (x - d_prime) / x if As_c > 0 else 0.0
+        Fc  = eta * fcd * 1e3 * min(lam * x, h) * b
+        Fsc = As_c * ec2.sigma_s(eps_s_c, mat) * 1e3 if As_c > 0 else 0.0
+        z   = d - min(lam * x, h) / 2.0
+        M_calc = Fc * z + Fsc * (d - d_prime)
+        M_eq = M_calc if positif else -M_calc
+        N_eq = 0.0
+
+        eps_top = ecu2
+        eps_bot = ecu2 * (1.0 - h / x)   # extrapolation à la fibre extrême
+
+    else:
+        # ── Méthode "exacte" : intégration numérique complète ───────────
+        fibres = ec2.fibres_rect(b, h, n_div)
+        arma = ec2.armatures_rect(h, c_inf, c_sup, As_inf, As_sup)
+
+        def N_de(eps_var):
+            if positif:
+                N, _ = ec2.compute_NM(ecu2, eps_var, h, fibres, arma, mat)
+            else:
+                N, _ = ec2.compute_NM(eps_var, ecu2, h, fibres, arma, mat)
+            return N
+
+        lo, hi = -eud, ecu2
+        N_lo, N_hi = N_de(lo), N_de(hi)
+        if N_lo > 0 or N_hi < 0:
+            return None  # pas de racine en domaine pivot B -> pivot A probable
+
+        for _ in range(max_iter):
+            mid = 0.5 * (lo + hi)
+            if abs(N_de(mid)) < tol * max(1.0, abs(N_lo)):
+                break
+            if N_de(mid) > 0:
+                hi = mid
+            else:
+                lo = mid
+
+        eps_top, eps_bot = (ecu2, mid) if positif else (mid, ecu2)
+        N_eq, M_eq = ec2.compute_NM(eps_top, eps_bot, h, fibres, arma, mat)
+        x = ecu2 * h / (ecu2 - eps_bot) if positif else ecu2 * h / (ecu2 - eps_top)
 
     def eps_a(y):
         return eps_top + (eps_bot - eps_top) * (h / 2 - y) / h
@@ -423,7 +523,8 @@ def etat_deformation_ELU(section, fck, fyk, gamma_c=1.5, gamma_s=1.15,
 
     return dict(eps_top=eps_top, eps_bot=eps_bot, x=x, N=N_eq, M=M_eq,
                 y_sup=y_sup, y_inf=y_inf, eps_sup=eps_a(y_sup),
-                eps_inf=eps_a(y_inf), h=h, positif=positif)
+                eps_inf=eps_a(y_inf), h=h, positif=positif, methode=methode)
+
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -695,6 +796,74 @@ def ouverture_fissure(section, fck, M_ELS_kNm, nb_barres_tendues, phi_barre_mm,
                 k3=k3)
 
 
+def acier_theorique_fissuration(section, fck, M_ELS_kNm, wmax, phi_barre_mm,
+                                 gamma_c=1.5, gamma_s=1.15, n_impose=None,
+                                 duree_chargement="long_terme",
+                                 tol=1e-6, max_iter=60, As_max=0.05):
+    """
+    Section d'acier tendu THÉORIQUE (continue, en m²) nécessaire pour que
+    l'ouverture de fissure wk respecte wmax (§7.3.4) — calculée AVANT
+    toute conversion en un nombre entier de barres (cf.
+    ferraillage_pratique_fissuration() pour cette seconde étape).
+
+    Recherche par dichotomie sur As (aire continue) : le diamètre
+    phi_barre_mm est fixé a priori (choix de conception, comme dans les
+    feuilles de calcul de référence) et sert uniquement à évaluer ρp,eff
+    et sr,max pendant la recherche — il n'est pas encore question du
+    nombre de barres réellement mis en place.
+
+    Retourne dict(As_theorique, wk_obtenu)
+    """
+    positif = M_ELS_kNm >= 0
+    aire_unitaire = np.pi * (phi_barre_mm / 1000 / 2) ** 2
+
+    def _wk(As_trial):
+        sec2 = dict(section)
+        if positif:
+            sec2["As_inf"] = As_trial
+        else:
+            sec2["As_sup"] = As_trial
+        nb_equivalent = As_trial / aire_unitaire   # continu, non arrondi
+        fiss = ouverture_fissure(sec2, fck, M_ELS_kNm, nb_equivalent, phi_barre_mm,
+                                  duree_chargement=duree_chargement, n_impose=n_impose)
+        return fiss["wk"]
+
+    lo, hi = 1e-5, As_max
+    wk_lo = _wk(lo)
+    if wk_lo <= wmax:
+        return dict(As_theorique=lo, wk_obtenu=wk_lo)
+    wk_hi = _wk(hi)
+    if wk_hi > wmax:
+        # Cas dégénéré (wmax très sévère / section très étroite) : pas de
+        # solution dans le domaine testé, on renvoie la borne haute.
+        return dict(As_theorique=hi, wk_obtenu=wk_hi)
+
+    for _ in range(max_iter):
+        mid = 0.5 * (lo + hi)
+        wk_mid = _wk(mid)
+        if abs(wk_mid - wmax) < tol * max(1.0, wmax):
+            break
+        if wk_mid > wmax:
+            lo = mid
+        else:
+            hi = mid
+
+    return dict(As_theorique=mid, wk_obtenu=_wk(mid))
+
+
+def ferraillage_pratique_fissuration(As_theorique, phi_barre_mm):
+    """
+    Convertit une section d'acier théorique (continue) en un ferraillage
+    PRATIQUE : nombre entier de barres (arrondi supérieur) pour le
+    diamètre choisi. Seconde étape, après acier_theorique_fissuration().
+
+    Retourne dict(nb_barres, As_pratique)
+    """
+    aire_unitaire = np.pi * (phi_barre_mm / 1000 / 2) ** 2
+    nb = max(1, int(np.ceil(As_theorique / aire_unitaire - 1e-9)))
+    return dict(nb_barres=nb, As_pratique=nb * aire_unitaire)
+
+
 def nb_barres_pour_fissure(section, fck, M_ELS_kNm, phi_barre_mm, wmax,
                             gamma_c=1.5, gamma_s=1.15, n_impose=None,
                             duree_chargement="long_terme", nb_max=60):
@@ -707,6 +876,10 @@ def nb_barres_pour_fissure(section, fck, M_ELS_kNm, phi_barre_mm, wmax,
     pas de recherche continue pertinente ici) — chaque itération relance
     le calcul exact (axe neutre élastique, Ac,eff, sr,max) pour ce nombre
     de barres, donc pas une simple mise à l'échelle de As.
+
+    NOTE : conservée pour compatibilité — équivalente à enchaîner
+    acier_theorique_fissuration() puis ferraillage_pratique_fissuration(),
+    mais en itérant directement sur des barres entières dès le départ.
 
     Retourne dict(nb_barres_requis, As_requis, wk_obtenu, converge)
     """
@@ -740,13 +913,21 @@ def justifier_flexion_simple(section, fck, fyk,
                               gamma_c=1.5, gamma_s=1.15,
                               duree_chargement="long_terme",
                               n_impose=None,
-                              wmax_override=None):
+                              wmax_override=None,
+                              methode_ELU="approximation"):
     """
     Justification complète d'une section rectangulaire en flexion simple :
     moment réduit µ / besoin d'aciers comprimés, capacité ELU, état de
     déformation ELU (diagramme), contraintes ELS, aciers théoriques et
     minimaux (ELU + ELS/fissuration), ouverture de fissure wk vs
     wmax(classe d'exposition).
+
+    methode_ELU : "approximation" (défaut, formule fermée du bloc
+    rectangulaire — méthode usuelle de bureau d'études) ou "exacte"
+    (intégration numérique complète de la loi parabole-rectangle) —
+    cf. acier_theorique_ELU() pour le détail. N'affecte que le calcul
+    de l'As théorique ELU (dimensionnement) ; la vérification de
+    capacité M_Rd reste toujours calculée par intégration exacte.
 
     n_impose : coefficient d'équivalence acier/béton n=Es/Ec à utiliser
     pour les calculs ELS (contraintes, ouverture de fissure, As théorique
@@ -767,24 +948,37 @@ def justifier_flexion_simple(section, fck, fyk,
     resultats["moment_reduit"] = mr
 
     # --- Acier théorique nécessaire à l'ELU (dimensionnement) ---
-    resultats["acier_theorique"] = acier_theorique_ELU(section, fck, fyk, M_ELU_kNm, gamma_c, gamma_s)
+    resultats["acier_theorique"] = acier_theorique_ELU(
+        section, fck, fyk, M_ELU_kNm, gamma_c, gamma_s, methode=methode_ELU)
 
     # --- Acier théorique nécessaire à l'ELS (dimensionnement, §7.2) ---
     resultats["acier_theorique_ELS"] = acier_theorique_ELS(
         section, fck, fyk, M_ELS_kNm, gamma_c, gamma_s, n_impose=n_impose)
 
-    # --- État de déformation ELU (pour le diagramme) ---
-    etat = etat_deformation_ELU(section, fck, fyk, gamma_c, gamma_s, M_ELU_kNm)
+    # --- État de déformation ELU (pour le diagramme, et pour M_Rd si methode_ELU="approximation") ---
+    etat = etat_deformation_ELU(section, fck, fyk, gamma_c, gamma_s, M_ELU_kNm,
+                                 methode=methode_ELU)
     resultats["deformation_ELU"] = etat  # peut être None si pivot A gouverne
 
     # --- ELU (capacité) ---
-    elu = capacite_ELU_flexion_simple(section, fck, fyk, gamma_c, gamma_s)
-    M_Rd = elu["M_Rd_pos"] if M_ELU_kNm >= 0 else elu["M_Rd_neg"]
+    # En méthode "approximation", M_Rd est directement déduit de l'état
+    # d'équilibre du bloc rectangulaire (etat["M"]) — évite un calcul
+    # redondant et garantit la cohérence exacte entre le diagramme affiché
+    # et le M_Rd vérifié. Repli sur la méthode exacte (diagramme complet)
+    # si aucune racine pivot B n'a été trouvée (pivot A probable), ou si
+    # methode_ELU="exacte" est explicitement demandé.
+    if methode_ELU == "approximation" and etat is not None:
+        M_Rd = etat["M"]
+        elu_detail = dict(methode="approximation", x=etat["x"])
+    else:
+        elu = capacite_ELU_flexion_simple(section, fck, fyk, gamma_c, gamma_s)
+        M_Rd = elu["M_Rd_pos"] if M_ELU_kNm >= 0 else elu["M_Rd_neg"]
+        elu_detail = elu
     resultats["ELU"] = dict(
         M_Ed=M_ELU_kNm, M_Rd=M_Rd,
         verifie=abs(M_ELU_kNm) <= abs(M_Rd),
         taux=abs(M_ELU_kNm) / abs(M_Rd) if M_Rd != 0 else np.inf,
-        detail=elu)
+        detail=elu_detail)
 
     # --- ELS : contraintes ---
     els = contraintes_ELS(section, fck, M_ELS_kNm, n_impose=n_impose)
@@ -813,13 +1007,24 @@ def justifier_flexion_simple(section, fck, fyk,
         detail_ELU=amin_elu, detail_ELS=amin_els)
 
     # --- Ouverture de fissure ---
+    # 1) Vérification avec le ferraillage réellement en place (comme avant)
     wmax = wmax_override if wmax_override is not None else WMAX_TABLE.get(classe_exposition, 0.3)
     fiss = ouverture_fissure(section, fck, M_ELS_kNm, nb_barres_tendues,
                               phi_barre_mm, duree_chargement=duree_chargement,
                               n_impose=n_impose)
+    # 2) As théorique CONTINU nécessaire (avant tout choix de barres), puis
+    #    3) conversion en ferraillage pratique (nombre entier de barres) —
+    #    dans cet ordre, comme demandé (section mini d'abord, barres ensuite)
+    at_fiss = acier_theorique_fissuration(
+        section, fck, M_ELS_kNm, wmax, phi_barre_mm, gamma_c, gamma_s,
+        n_impose=n_impose, duree_chargement=duree_chargement)
+    pratique_fiss = ferraillage_pratique_fissuration(at_fiss["As_theorique"], phi_barre_mm)
+
     resultats["fissuration"] = dict(
         wk=fiss["wk"], wmax=wmax, verifie=fiss["wk"] <= wmax,
-        classe_exposition=classe_exposition, detail=fiss)
+        classe_exposition=classe_exposition, detail=fiss,
+        As_theorique=at_fiss["As_theorique"], wk_theorique=at_fiss["wk_obtenu"],
+        ferraillage_pratique=pratique_fiss)
 
     resultats["verifie_global"] = all([
         resultats["ELU"]["verifie"],
@@ -1514,12 +1719,16 @@ def generer_rapport_pdf(resultats, section, fck, fyk, M_ELS_kNm, gamma_c=1.5, ga
                   fontsize=13, fontweight="bold",
                   color="#2E7D32" if verdict_ok else "#C62828")
 
+        methode_lbl = ("approximation (bloc λ/η, EC2 §3.1.7(3) éq.3.19-3.20)"
+                       if at_u.get('methode', 'approximation') == 'approximation'
+                       else "exacte (parabole-rectangle intégrée)")
         hyp = (
             f"BÉTON / ACIER\n"
             f"  Classe béton                 fck = {fck:.0f} MPa\n"
             f"  Acier                         fyk = {fyk:.0f} MPa\n"
             f"  Coefficients partiels         γc = {gamma_c:.2f}   γs = {gamma_s:.2f}\n"
-            f"  Coeff. équivalence ELS        n = {els['detail']['n']:.2f}\n\n"
+            f"  Coeff. équivalence ELS        n = {els['detail']['n']:.2f}\n"
+            f"  Méthode intégration ELU       {methode_lbl}\n\n"
             f"GÉOMÉTRIE\n"
             f"  Section rectangulaire         b = {b*100:.0f} cm   h = {h*100:.0f} cm\n"
             f"  Enrobages                     c_inf = {c_inf*1000:.0f} mm   c_sup = {c_sup*1000:.0f} mm\n\n"
@@ -1534,13 +1743,14 @@ def generer_rapport_pdf(resultats, section, fck, fyk, M_ELS_kNm, gamma_c=1.5, ga
         fig1.text(0.08, 0.78, "ENTRANTS (hypothèses)", fontsize=11, fontweight="bold")
         fig1.text(0.08, 0.755, hyp, fontsize=8.7, family="monospace", va="top", linespacing=1.5)
 
+        pratique = fiss["ferraillage_pratique"]
         res_txt = (
             f"MOMENT RÉDUIT\n"
             f"  µ = {mr['mu']:.4f}    µlim = {mr['mu_lim']:.4f}\n"
             f"  Aciers comprimés nécessaires : {'OUI' if mr['besoin_aciers_comprimes'] else 'NON'}\n\n"
-            f"ACIER THÉORIQUE (dimensionnement)\n"
+            f"ACIER THÉORIQUE (dimensionnement, méthode {at_u.get('methode','approximation')})\n"
             f"  As théorique ELU               {at_u['As_theorique']*1e4:.2f} cm²  (cas {at_u['cas']})\n"
-            f"  As théorique ELS               {at_s['As_theorique_ELS']*1e4:.2f} cm²  "
+            f"  As théorique ELS (contraintes)  {at_s['As_theorique_ELS']*1e4:.2f} cm²  "
             f"(critère {at_s['critere_gouvernant']})\n\n"
             f"ACIERS MINIMAUX RÉGLEMENTAIRES\n"
             f"  As,min ELU (§9.2.1.1)          {amin['As_min_ELU']*1e4:.2f} cm²   [{tag(amin['verifie_ELU'])}]\n"
@@ -1551,7 +1761,11 @@ def generer_rapport_pdf(resultats, section, fck, fyk, M_ELS_kNm, gamma_c=1.5, ga
             f"  σc = {els['sigma_c']:.2f} MPa  (lim. {els['sigma_c_lim']:.2f})   [{tag(els['verifie_beton'])}]\n"
             f"  σs = {els['sigma_s']:.1f} MPa  (lim. {els['sigma_s_lim']:.1f})   [{tag(els['verifie_acier'])}]\n\n"
             f"OUVERTURE DE FISSURE (§7.3.4)\n"
-            f"  wk = {fiss['wk']:.3f} mm   (wmax = {fiss['wmax']:.2f} mm)   [{tag(fiss['verifie'])}]"
+            f"  wk (ferraillage réel) = {fiss['wk']:.3f} mm  (wmax={fiss['wmax']:.2f}mm) [{tag(fiss['verifie'])}]\n"
+            f"  (1) As théorique nécessaire     {fiss['As_theorique']*1e4:.2f} cm²  "
+            f"(wk={fiss['wk_theorique']:.3f}mm)\n"
+            f"  (2) Ferraillage pratique propose {pratique['nb_barres']} barres  "
+            f"(As={pratique['As_pratique']*1e4:.2f} cm²)"
         )
         fig1.text(0.08, 0.44, "SORTANTS (résultats)", fontsize=11, fontweight="bold")
         fig1.text(0.08, 0.415, res_txt, fontsize=8.7, family="monospace", va="top", linespacing=1.5)

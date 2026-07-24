@@ -45,6 +45,13 @@ with st.sidebar:
                                 help="Valeur forfaitaire usuelle : 15 (béton ordinaire).")
     n_impose = None if n_auto else n_valeur
 
+    methode_exacte = st.checkbox("Utiliser l'intégration parabolique exacte (ELU)", value=False,
+                                  help="Décoché (défaut) : formule fermée du bloc rectangulaire "
+                                       "équivalent (α, z) — méthode usuelle de bureau d'études. "
+                                       "Coché : intégration numérique complète de la loi "
+                                       "parabole-rectangle (plus rigoureuse, écart typique <1%).")
+    methode_ELU = "exacte" if methode_exacte else "approximation"
+
     st.header("2. Géométrie")
     col1, col2 = st.columns(2)
     b = col1.number_input("b [m]", value=0.30, step=0.05, min_value=0.05)
@@ -159,7 +166,8 @@ try:
         gamma_c=gamma_c, gamma_s=gamma_s,
         duree_chargement=duree,
         n_impose=n_impose,
-        wmax_override=wmax_actif)
+        wmax_override=wmax_actif,
+        methode_ELU=methode_ELU)
 except Exception as e:
     st.error(f"Erreur de calcul : {type(e).__name__} — {e}")
     st.stop()
@@ -177,7 +185,8 @@ a0 = res["aciers_minimaux"]
 at = res["acier_theorique"]
 at_els = res["acier_theorique_ELS"]
 col_a1, col_a2, col_a3, col_a4, col_a5 = st.columns(5)
-col_a1.metric("As théorique ELU", f"{at['As_theorique']*1e4:.2f} cm²")
+col_a1.metric(f"As théorique ELU ({'exacte' if methode_ELU=='exacte' else 'approx.'})",
+              f"{at['As_theorique']*1e4:.2f} cm²")
 col_a2.metric("As théorique ELS", f"{at_els['As_theorique_ELS']*1e4:.2f} cm²")
 col_a3.metric("As,min ELU (§9.2.1.1)", f"{a0['As_min_ELU']*1e4:.2f} cm²")
 col_a4.metric("As,min ELS (§7.3.2)", f"{a0['As_min_ELS']*1e4:.2f} cm²")
@@ -234,27 +243,23 @@ with col2:
     st.subheader("Ouverture de fissure (§7.3.4)")
     f = res["fissuration"]
     face_txt = "fibre inf." if positif else "fibre sup."
-    st.write(f"wk = **{f['wk']:.3f} mm**  (wmax = {f['wmax']:.2f} mm, {face_txt}, "
-             f"classe {f['classe_exposition']})  " + ("✔" if f["verifie"] else "✘"))
+    st.write(f"wk (avec ferraillage réel) = **{f['wk']:.3f} mm**  "
+             f"(wmax = {f['wmax']:.2f} mm, {face_txt}, classe {f['classe_exposition']})  "
+             + ("✔" if f["verifie"] else "✘"))
     st.caption(f"Formule retenue : {f['detail']['formule']}")
 
-    if not f["verifie"]:
-        if st.button("🔁 Calculer le nb de barres minimal pour respecter wk,max", key="btn_iter"):
-            with st.spinner("Calcul itératif en cours..."):
-                iter_res = fs.nb_barres_pour_fissure(
-                    section, fck, M_ELS, phi_barre, wmax_actif,
-                    gamma_c=gamma_c, gamma_s=gamma_s, n_impose=n_impose,
-                    duree_chargement=duree)
-            if iter_res["converge"]:
-                st.success(f"**{iter_res['nb_barres_requis']} barres HA{phi_barre}** "
-                           f"(As = {iter_res['As_requis']*1e4:.2f} cm²) suffisent : "
-                           f"wk = {iter_res['wk_obtenu']:.3f} mm ≤ {wmax_actif:.2f} mm.\n\n"
-                           f"Ajustez le nombre de barres du lit 1 dans la barre latérale "
-                           f"en conséquence.", icon="✅")
-            else:
-                st.error(f"Pas de convergence avec des HA{phi_barre} seuls (60 barres testées "
-                         f"sans succès) — essayez un diamètre plus fin ou plusieurs lits.",
-                         icon="⚠️")
+    st.markdown("**① Section d'acier théorique nécessaire**")
+    st.write(f"As nécessaire (continu) = **{f['As_theorique']*1e4:.2f} cm²** "
+             f"— wk obtenu = {f['wk_theorique']:.3f} mm ≤ {f['wmax']:.2f} mm")
+    st.caption("Calculée avant tout choix de barres, par dichotomie sur l'aire (diamètre "
+               f"HA{phi_barre:.0f} fixé pour ρp,eff et sr,max).")
+
+    st.markdown("**② Ferraillage pratique proposé**")
+    prat = f["ferraillage_pratique"]
+    st.write(f"→ **{prat['nb_barres']} × HA{phi_barre:.0f}** "
+             f"(As = {prat['As_pratique']*1e4:.2f} cm²)")
+    st.caption("Arrondi supérieur du nombre de barres pour le diamètre choisi — "
+               "ajustez le nombre de barres du lit 1 dans la barre latérale en conséquence.")
 
 st.markdown("---")
 st.subheader("Schéma ELU — section, déformations et bloc de contraintes (alignés)")
@@ -297,8 +302,11 @@ df = pd.DataFrame([
     ("εsm (déformation moyenne acier)", f"{res['fissuration']['detail']['eps_sm']*1e3:.3f} ‰"),
     ("εcm (déformation moyenne béton tendu)", f"{res['fissuration']['detail']['eps_cm']*1e3:.3f} ‰"),
     ("εsm − εcm", f"{res['fissuration']['detail']['esm_ecm']*1e3:.3f} ‰"),
-    ("wk", f"{res['fissuration']['wk']:.3f} mm"),
+    ("wk (ferraillage réel)", f"{res['fissuration']['wk']:.3f} mm"),
     ("sr,max", f"{res['fissuration']['detail']['sr_max']:.1f} mm"),
+    ("As théorique fissuration", f"{res['fissuration']['As_theorique']*1e4:.2f} cm²"),
+    ("Ferraillage pratique fissuration",
+     f"{res['fissuration']['ferraillage_pratique']['nb_barres']} × HA{phi_barre:.0f}"),
 ], columns=["Grandeur", "Valeur"])
 st.dataframe(df, hide_index=True, width="stretch")
 
