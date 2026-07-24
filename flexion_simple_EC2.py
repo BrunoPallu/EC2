@@ -1458,6 +1458,74 @@ def schema_bloc_rectangulaire(section, fck, fyk, etat, gamma_c=1.5, gamma_s=1.15
     return fig
 
 
+def efforts_bloc_rectangulaire(section, fck, fyk, etat, gamma_c=1.5, gamma_s=1.15,
+                                geom_inf=None, geom_sup=None):
+    """
+    Calcule les efforts internes du bloc de contraintes rectangulaire
+    équivalent (Fc, Fs, Fsc, contraintes associées, bras de levier, Mu)
+    pour l'état ELU donné (etat renvoyé par etat_deformation_ELU) —
+    fonction partagée par schema_ELU_complet() (tracé) et par l'affichage
+    des résultats (page/rapport), pour éviter de dupliquer les formules.
+
+    geom_inf, geom_sup : dict renvoyés par geometrie_nappe(), pour la
+    position réelle (lits) des aciers comprimés si définis — sinon
+    l'enrobage nominal c_sup/c_inf est utilisé.
+
+    Retourne dict(Fc, Fs, Fsc, sigma_s, sigma_sc, eps_s, eps_sc, z,
+    z_prime, d, d_prime, lam, eta, Mu, As_c_total)
+    """
+    b, h = section["b"], section["h"]
+    c_inf, c_sup = section["c_inf"], section["c_sup"]
+    As_inf, As_sup = section["As_inf"], section["As_sup"]
+
+    mat = ec2.get_material_params(fck, fyk, gamma_c, gamma_s)
+    fcd = mat["fcd"]
+    lam, eta = lambda_eta_EC2(fck)
+
+    positif = etat["positif"]
+    d = (h - c_inf) if positif else (h - c_sup)
+    x = etat["x"]
+    eps_top_extreme = etat["eps_top"]
+    eps_bot_extreme = etat["eps_bot"]
+
+    def _eps_a(y):
+        return eps_top_extreme + (eps_bot_extreme - eps_top_extreme) * (h / 2 - y) / h
+
+    y_acier_t = (-h / 2 + c_inf) if positif else (h / 2 - c_sup)
+    eps_s = _eps_a(y_acier_t)
+
+    As_c_total = As_sup if positif else As_inf
+    if geom_sup is not None and positif and geom_sup["As_total"] > 0:
+        d_prime_reel = geom_sup["c_eff"]
+    elif geom_inf is not None and not positif and geom_inf["As_total"] > 0:
+        d_prime_reel = geom_inf["c_eff"]
+    else:
+        d_prime_reel = c_sup if positif else c_inf
+    y_acier_c_t = (h / 2 - d_prime_reel) if positif else (-h / 2 + d_prime_reel)
+    eps_sc = _eps_a(y_acier_c_t) if As_c_total > 0 else 0.0
+
+    lx = lam * x
+    z = d - lx / 2.0
+    Fc = eta * fcd * 1e3 * lx * b
+    As_t = As_inf if positif else As_sup
+    fyd = mat["fyd"]
+    sigma_s = ec2.sigma_s(abs(eps_s), mat) if As_t > 0 else fyd
+    Fs = As_t * sigma_s * 1e3
+    if As_c_total > 0:
+        sigma_sc = ec2.sigma_s(eps_sc, mat)   # compression -> positif
+        Fsc = As_c_total * sigma_sc * 1e3
+        z_prime = d - d_prime_reel
+        Mu = Fc * z + Fsc * z_prime
+    else:
+        Fsc = 0.0 ; sigma_sc = 0.0 ; z_prime = 0.0
+        Mu = Fc * z
+
+    return dict(Fc=Fc, Fs=Fs, Fsc=Fsc, sigma_s=sigma_s, sigma_sc=sigma_sc,
+                eps_s=eps_s, eps_sc=eps_sc, z=z, z_prime=z_prime,
+                d=d, d_prime=d_prime_reel, lam=lam, eta=eta, Mu=Mu,
+                As_c_total=As_c_total, y_acier_t=y_acier_t, y_acier_c_t=y_acier_c_t)
+
+
 def schema_ELU_complet(section, fck, fyk, etat, gamma_c=1.5, gamma_s=1.15,
                         geom_inf=None, geom_sup=None, nom_fichier=None):
     """
@@ -1485,39 +1553,37 @@ def schema_ELU_complet(section, fck, fyk, etat, gamma_c=1.5, gamma_s=1.15,
     c_inf, c_sup = section["c_inf"], section["c_sup"]
     As_inf, As_sup = section["As_inf"], section["As_sup"]
 
-    mat = ec2.get_material_params(fck, fyk, gamma_c, gamma_s)
-    fcd = mat["fcd"]
-    lam, eta = lambda_eta_EC2(fck)
-
     positif = etat["positif"]
-    d = (h - c_inf) if positif else (h - c_sup)
     x = etat["x"]
     eps_top_extreme = etat["eps_top"]
     eps_bot_extreme = etat["eps_bot"]
 
+    ef = efforts_bloc_rectangulaire(section, fck, fyk, etat, gamma_c, gamma_s,
+                                     geom_inf=geom_inf, geom_sup=geom_sup)
+    d = ef["d"] ;  eps_s = ef["eps_s"] ;  y_acier_t = ef["y_acier_t"]
+    As_c_total = ef["As_c_total"] ;  d_prime_reel = ef["d_prime"]
+    y_acier_c_t = ef["y_acier_c_t"] ;  eps_sc = ef["eps_sc"]
+    lam = ef["lam"] ;  eta = ef["eta"]
+    Fc = ef["Fc"] ;  Fs = ef["Fs"] ;  Fsc = ef["Fsc"]
+    sigma_s = ef["sigma_s"] ;  sigma_sc = ef["sigma_sc"]
+    z = ef["z"] ;  Mu = ef["Mu"]
+    mat = ec2.get_material_params(fck, fyk, gamma_c, gamma_s)
+    fcd = mat["fcd"]
+
     def _eps_a(y):
         return eps_top_extreme + (eps_bot_extreme - eps_top_extreme) * (h / 2 - y) / h
-
-    y_acier_t = (-h / 2 + c_inf) if positif else (h / 2 - c_sup)
-    eps_s = _eps_a(y_acier_t)
-
-    lx = lam * x
-    z = d - lx / 2.0
-    Fc = eta * fcd * 1e3 * lx * b
-    As_t = As_inf if positif else As_sup
-    fyd = mat["fyd"]
-    sigma_s = ec2.sigma_s(abs(eps_s), mat) if As_t > 0 else fyd
-    Fs = As_t * sigma_s * 1e3
-    Mu = Fc * z
 
     # ── Échelle et limites COMMUNES aux 3 panneaux ──────────────────────
     sc = 1.0 / h
     bS, hS = b * sc, h * sc
     y_top, y_bot = hS, 0.0
-    y_acier_S = (y_acier_t + h / 2.0) * sc      # barycentre acier tendu, repère bas=0
+    y_acier_S = (y_acier_t + h / 2.0) * sc      # barycentre acier TENDU, repère bas=0
+    y_acier_c_S = (y_acier_c_t + h / 2.0) * sc  # barycentre acier COMPRIMÉ (si défini)
+
     YLIM = (-0.32, hS + 0.28)                   # IDENTIQUE sur les 3 panneaux
 
     geom_tendu = geom_inf if positif else geom_sup
+    geom_comprime = geom_sup if positif else geom_inf
 
     # A3 paysage : 420 x 297 mm = 16,54 x 11,69 pouces
     fig, (ax_sec, ax_def, ax_bloc) = plt.subplots(
@@ -1525,6 +1591,7 @@ def schema_ELU_complet(section, fck, fyk, etat, gamma_c=1.5, gamma_s=1.15,
         gridspec_kw={"width_ratios": [0.9, 1.0, 1.3]})
 
     COL_REF = "#B0BEC5"
+    COL_COMPRIME = "#1565C0"   # bleu : aciers comprimés (distinct du rouge = tendus)
 
     def _lignes_reperes(ax):
         """Repères horizontaux communs : fibre sup, fibre inf, barycentre acier."""
@@ -1555,10 +1622,29 @@ def schema_ELU_complet(section, fck, fyk, etat, gamma_c=1.5, gamma_s=1.15,
         ax_sec.add_patch(mpatches.Rectangle((-bS/2*0.55, y_acier_dot - 0.012), bS*0.55, 0.024,
                                              fc="#334", ec="none", zorder=5))
 
+    # Aciers comprimés (nappe opposée), si définis
+    if geom_comprime is not None and geom_comprime["As_total"] > 0:
+        for i, lit in enumerate(geom_comprime["lits"]):
+            y_S = (lit["y"] + h/2) * sc
+            r_b = 0.018 + 0.0035 * lit["phi_mm"] / 12.0
+            nb = lit["nb"]
+            marge = bS * 0.08
+            xs = np.linspace(-bS/2 + marge, bS/2 - marge, nb) if nb > 1 else [0.0]
+            for xb in xs:
+                ax_sec.add_patch(plt.Circle((xb, y_S), r_b, color=COL_COMPRIME, zorder=5))
+            ax_sec.annotate(f"Lit {i+1}' : {nb}HA{int(lit['phi_mm'])} (comprimé)",
+                            (bS/2 + marge, y_S), xytext=(bS/2 + 0.10, y_S),
+                            fontsize=9, va="center", ha="left", color=COL_COMPRIME)
+
     ax_sec.annotate("", xy=(-bS/2-0.10, y_top), xytext=(-bS/2-0.10, y_acier_S),
                      arrowprops=dict(arrowstyle="<->", color="#1565C0", lw=1.2))
     ax_sec.text(-bS/2-0.14, (y_top+y_acier_S)/2, "d", fontsize=13, ha="right",
                 va="center", style="italic", color="#1565C0", fontweight="bold")
+    if As_c_total > 0:
+        ax_sec.annotate("", xy=(-bS/2-0.28, y_top), xytext=(-bS/2-0.28, y_acier_c_S),
+                         arrowprops=dict(arrowstyle="<->", color=COL_COMPRIME, lw=1.1))
+        ax_sec.text(-bS/2-0.32, (y_top+y_acier_c_S)/2, "d'", fontsize=12, ha="right",
+                    va="center", style="italic", color=COL_COMPRIME, fontweight="bold")
     ax_sec.annotate("", xy=(-bS/2, -0.10), xytext=(bS/2, -0.10),
                      arrowprops=dict(arrowstyle="<->", color="#333", lw=1))
     ax_sec.text(0, -0.16, f"b={b*100:.0f}cm", ha="center", fontsize=10)
@@ -1597,6 +1683,10 @@ def schema_ELU_complet(section, fck, fyk, etat, gamma_c=1.5, gamma_s=1.15,
     ax_def.plot(e_to_x(eps_s), y_acier_S, "o", color="#C62828", ms=8, zorder=6)
     ax_def.text(e_to_x(eps_s)+0.05, y_acier_S, f"A (acier)\nεs={eps_s*1e3:.2f}‰",
                 fontsize=10.5, color="#C62828", va="center", fontweight="bold")
+    if As_c_total > 0:
+        ax_def.plot(e_to_x(eps_sc), y_acier_c_S, "o", color=COL_COMPRIME, ms=8, zorder=6)
+        ax_def.text(e_to_x(eps_sc)+0.05, y_acier_c_S, f"A' (acier comprimé)\nεsc={eps_sc*1e3:+.2f}‰",
+                    fontsize=9.5, color=COL_COMPRIME, va="center", fontweight="bold")
     ax_def.annotate("", xy=(e_axis_h+0.15, hS/2), xytext=(-e_axis_h-0.15, hS/2),
                      arrowprops=dict(arrowstyle="->", color="#333", lw=1))
     ax_def.text(e_axis_h+0.20, hS/2, "ε", fontsize=13, style="italic", va="center")
@@ -1616,7 +1706,7 @@ def schema_ELU_complet(section, fck, fyk, etat, gamma_c=1.5, gamma_s=1.15,
                  fontsize=9.5, ha="center")
     ax_bloc.annotate("", xy=(0.42, hS), xytext=(0.42, hS - lxS),
                       arrowprops=dict(arrowstyle="<->", color="#2E7D32", lw=1.1))
-    ax_bloc.text(0.46, hS - lxS/2, f"λ.x\n={lx*1000:.0f}mm", fontsize=9,
+    ax_bloc.text(0.46, hS - lxS/2, f"λ.x\n={lxS/sc*1000:.0f}mm", fontsize=9,
                  color="#2E7D32", va="center")
 
     y_Fc = hS - lxS/2
@@ -1624,6 +1714,13 @@ def schema_ELU_complet(section, fck, fyk, etat, gamma_c=1.5, gamma_s=1.15,
                       arrowprops=dict(arrowstyle="<-", color="#C62828", lw=2.2))
     ax_bloc.text(-0.18, y_Fc, f"Fc={Fc:.0f}kN", fontsize=10, color="#C62828",
                  ha="right", va="center", fontweight="bold")
+
+    if As_c_total > 0:
+        ax_bloc.plot([0.05, 0.35], [y_acier_c_S, y_acier_c_S], color=COL_COMPRIME, lw=3, zorder=4)
+        ax_bloc.annotate("", xy=(-0.15, y_acier_c_S), xytext=(0.05, y_acier_c_S),
+                          arrowprops=dict(arrowstyle="<-", color=COL_COMPRIME, lw=2.2))
+        ax_bloc.text(-0.18, y_acier_c_S, f"Fsc={Fsc:.0f}kN\n(σsc={sigma_sc:.0f}MPa)",
+                     fontsize=9, color=COL_COMPRIME, ha="right", va="center", fontweight="bold")
 
     ax_bloc.plot([0.05, 0.40], [y_acier_S, y_acier_S], color="#334", lw=3, zorder=4)
     ax_bloc.annotate("", xy=(0.55, y_acier_S), xytext=(0.05, y_acier_S),

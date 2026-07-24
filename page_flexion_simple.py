@@ -272,10 +272,25 @@ if res["deformation_ELU"] is not None:
                                          geom_inf=geom_inf_plot, geom_sup=geom_sup_plot)
     st.pyplot(fig_complet, width="stretch")
     d = res["deformation_ELU"]
+    ef = fs.efforts_bloc_rectangulaire(section, fck, fyk, d, gamma_c=gamma_c, gamma_s=gamma_s,
+                                        geom_inf=geom_inf_plot, geom_sup=geom_sup_plot)
+
     col_i1, col_i2, col_i3 = st.columns(3)
     col_i1.metric("Axe neutre x", f"{d['x']*1000:.1f} mm")
     col_i2.metric("εsup", f"{d['eps_sup']*1e3:+.2f} ‰")
     col_i3.metric("εinf", f"{d['eps_inf']*1e3:+.2f} ‰")
+
+    if ef["As_c_total"] > 0:
+        st.markdown("**Efforts internes (bloc rectangulaire équivalent)**")
+        col_f1, col_f2, col_f3, col_f4 = st.columns(4)
+        col_f1.metric("Fc (béton)", f"{ef['Fc']:.0f} kN")
+        col_f2.metric("Fs (acier tendu)", f"{ef['Fs']:.0f} kN", f"σs={ef['sigma_s']:.0f} MPa")
+        col_f3.metric("Fsc (acier comprimé)", f"{ef['Fsc']:.0f} kN", f"σsc={ef['sigma_sc']:.0f} MPa")
+        col_f4.metric("Mu", f"{ef['Mu']:.0f} kN·m")
+        st.caption(f"Équilibre : Fc + Fsc = {ef['Fc']+ef['Fsc']:.1f} kN  ≈  Fs = {ef['Fs']:.1f} kN "
+                   f"(N=0, à l'écart d'arrondi près). εsc au niveau des aciers comprimés = "
+                   f"{ef['eps_sc']*1e3:+.2f}‰, d' = {ef['d_prime']*1000:.0f} mm.")
+
     st.caption("Les 3 panneaux partagent la même échelle verticale : fibre supérieure, fibre "
                "inférieure et barycentre réel des aciers tendus sont à la même hauteur sur "
                "les 3 panneaux (repères horizontaux pointillés). État affiché à la ruine "
