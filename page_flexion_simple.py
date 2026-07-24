@@ -18,6 +18,8 @@ CLASSES_BETON = [
 CLASSES_EXPOSITION = ["X0", "XC1", "XC2", "XC3", "XC4",
                       "XD1", "XD2", "XD3", "XS1", "XS2", "XS3"]
 
+DIAMETRES_HA = [5, 6, 8, 10, 12, 14, 16, 20, 25, 32, 40]
+
 st.title("Justification à la flexion simple — Eurocode 2")
 st.caption("Section rectangulaire — ELU, ELS, aciers minimaux, ouverture de fissure "
            "(NF EN 1992-1-1 §6.1, §7.2, §7.3, §9.2.1.1 + Annexe Nationale française)")
@@ -52,17 +54,39 @@ with st.sidebar:
 
     st.header("3. Ferraillage (nappe tendue)")
     st.caption("Sous le moment ELU saisi ci-dessous : nappe inf. si M≥0, nappe sup. si M<0")
-    phi_barre = st.number_input("Ø barres [mm]", value=16.0, step=1.0)
+    phi_barre = st.selectbox("Ø barres", DIAMETRES_HA, index=DIAMETRES_HA.index(16),
+                              format_func=lambda d: f"HA{d}")
     nb_lits = st.radio("Nombre de lits", [1, 2], horizontal=True)
     col1, col2 = st.columns(2)
     nb_lit1 = col1.number_input("Nb barres — lit 1 (près du parement)", value=4, step=1, min_value=1)
     nb_lit2 = col2.number_input("Nb barres — lit 2", value=2, step=1, min_value=0,
                                  disabled=(nb_lits == 1))
     entraxe_lits = st.number_input(
-        "Entraxe vertical entre lits [mm]", value=phi_barre + 20.0, step=1.0,
+        "Entraxe vertical entre lits [mm]", value=float(phi_barre) + 20.0, step=1.0,
         disabled=(nb_lits == 1),
         help="Distance axe à axe entre lits. Défaut = Ø + 20mm (écartement usuel).")
     nb_barres_par_lit = [int(nb_lit1), int(nb_lit2) if nb_lits == 2 else 0]
+
+    st.header("3bis. Aciers comprimés (optionnel)")
+    avec_ac = st.checkbox("Définir des aciers comprimés", value=False,
+                           help="Décoché par défaut : pas d'aciers comprimés (section simplement armée).")
+    if avec_ac:
+        phi_barre_c = st.selectbox("Ø barres comprimées", DIAMETRES_HA,
+                                    index=DIAMETRES_HA.index(12), format_func=lambda d: f"HA{d}",
+                                    key="phi_c")
+        nb_lits_c = st.radio("Nombre de lits (comprimé)", [1, 2], horizontal=True, key="lits_c")
+        col1, col2 = st.columns(2)
+        nb_lit1_c = col1.number_input("Nb barres — lit 1", value=2, step=1, min_value=1, key="l1c")
+        nb_lit2_c = col2.number_input("Nb barres — lit 2", value=0, step=1, min_value=0,
+                                       disabled=(nb_lits_c == 1), key="l2c")
+        entraxe_lits_c = st.number_input(
+            "Entraxe vertical entre lits [mm]", value=float(phi_barre_c) + 20.0, step=1.0,
+            disabled=(nb_lits_c == 1), key="ec")
+        nb_barres_par_lit_c = [int(nb_lit1_c), int(nb_lit2_c) if nb_lits_c == 2 else 0]
+    else:
+        phi_barre_c = 12.0
+        nb_barres_par_lit_c = [0, 0]
+        entraxe_lits_c = phi_barre_c + 20.0
 
     st.header("4. Sollicitations")
     M_ELU = st.number_input("M_Ed ELU [kN·m]", value=150.0, step=10.0,
@@ -71,6 +95,12 @@ with st.sidebar:
 
     st.header("5. Durabilité")
     classe_exposition = st.selectbox("Classe d'exposition", CLASSES_EXPOSITION, index=1)
+    wmax_defaut = fs.WMAX_TABLE.get(classe_exposition, 0.3)
+    col1, col2 = st.columns(2)
+    wmax_inf = col1.number_input("wk,max fibre inf. [mm]", value=wmax_defaut, step=0.05,
+                                  format="%.2f", help="Préréglé selon la classe d'exposition, modifiable.")
+    wmax_sup = col2.number_input("wk,max fibre sup. [mm]", value=wmax_defaut, step=0.05,
+                                  format="%.2f", help="Préréglé selon la classe d'exposition, modifiable.")
     duree = st.radio("Durée de chargement (fissuration)",
                       ["long_terme", "court_terme"],
                       format_func=lambda x: "Longue durée (kt=0,4)" if x == "long_terme"
@@ -85,24 +115,40 @@ with st.sidebar:
 # ═══════════════════════════════════════════════════════════════════════
 positif = M_ELU >= 0
 cote = "inf" if positif else "sup"
+cote_comp = "sup" if positif else "inf"
 enrobage_nominal = c_inf if positif else c_sup
+enrobage_comp = c_sup if positif else c_inf
 
 geom = fs.geometrie_nappe(h, enrobage_nominal, nb_barres_par_lit, phi_barre,
                            entraxe_vertical_mm=entraxe_lits, cote=cote)
 As = geom["As_total"]
+
+if avec_ac:
+    geom_c = fs.geometrie_nappe(h, enrobage_comp, nb_barres_par_lit_c, phi_barre_c,
+                                 entraxe_vertical_mm=entraxe_lits_c, cote=cote_comp)
+    As_c = geom_c["As_total"]
+    c_eff_comp = geom_c["c_eff"] if As_c > 0 else enrobage_comp
+else:
+    geom_c = None
+    As_c = 0.0
+    c_eff_comp = enrobage_comp
 
 # Section "effective" transmise au moteur de calcul : c_eff reproduit
 # exactement le bras de levier réel (centroïde des lits), quel que soit
 # le nombre de lits — aucune autre fonction du moteur n'a besoin d'être
 # modifiée pour ça.
 if positif:
-    section = dict(b=b, h=h, c_inf=geom["c_eff"], c_sup=c_sup, As_inf=As, As_sup=0.0)
+    section = dict(b=b, h=h, c_inf=geom["c_eff"], c_sup=c_eff_comp, As_inf=As, As_sup=As_c)
 else:
-    section = dict(b=b, h=h, c_inf=c_inf, c_sup=geom["c_eff"], As_inf=0.0, As_sup=As)
+    section = dict(b=b, h=h, c_inf=c_eff_comp, c_sup=geom["c_eff"], As_inf=As_c, As_sup=As)
+
+wmax_actif = wmax_inf if positif else wmax_sup
 
 st.sidebar.metric("As nappe tendue (réel)", f"{As*1e4:.2f} cm²")
 st.sidebar.caption(f"Bras de levier réel d = {geom['d_eff']*1000:.1f} mm "
                     f"(enrobage équivalent = {geom['c_eff']*1000:.1f} mm)")
+if avec_ac:
+    st.sidebar.metric("As' nappe comprimée (réel)", f"{As_c*1e4:.2f} cm²")
 
 try:
     res = fs.justifier_flexion_simple(
@@ -112,7 +158,8 @@ try:
         classe_exposition=classe_exposition,
         gamma_c=gamma_c, gamma_s=gamma_s,
         duree_chargement=duree,
-        n_impose=n_impose)
+        n_impose=n_impose,
+        wmax_override=wmax_actif)
 except Exception as e:
     st.error(f"Erreur de calcul : {type(e).__name__} — {e}")
     st.stop()
@@ -186,14 +233,33 @@ with col2:
 
     st.subheader("Ouverture de fissure (§7.3.4)")
     f = res["fissuration"]
-    st.write(f"wk = **{f['wk']:.3f} mm**  (wmax = {f['wmax']:.2f} mm, classe {f['classe_exposition']})  "
-             + ("✔" if f["verifie"] else "✘"))
+    face_txt = "fibre inf." if positif else "fibre sup."
+    st.write(f"wk = **{f['wk']:.3f} mm**  (wmax = {f['wmax']:.2f} mm, {face_txt}, "
+             f"classe {f['classe_exposition']})  " + ("✔" if f["verifie"] else "✘"))
     st.caption(f"Formule retenue : {f['detail']['formule']}")
+
+    if not f["verifie"]:
+        if st.button("🔁 Calculer le nb de barres minimal pour respecter wk,max", key="btn_iter"):
+            with st.spinner("Calcul itératif en cours..."):
+                iter_res = fs.nb_barres_pour_fissure(
+                    section, fck, M_ELS, phi_barre, wmax_actif,
+                    gamma_c=gamma_c, gamma_s=gamma_s, n_impose=n_impose,
+                    duree_chargement=duree)
+            if iter_res["converge"]:
+                st.success(f"**{iter_res['nb_barres_requis']} barres HA{phi_barre}** "
+                           f"(As = {iter_res['As_requis']*1e4:.2f} cm²) suffisent : "
+                           f"wk = {iter_res['wk_obtenu']:.3f} mm ≤ {wmax_actif:.2f} mm.\n\n"
+                           f"Ajustez le nombre de barres du lit 1 dans la barre latérale "
+                           f"en conséquence.", icon="✅")
+            else:
+                st.error(f"Pas de convergence avec des HA{phi_barre} seuls (60 barres testées "
+                         f"sans succès) — essayez un diamètre plus fin ou plusieurs lits.",
+                         icon="⚠️")
 
 st.markdown("---")
 st.subheader("Schéma ELU — section, déformations et bloc de contraintes (alignés)")
-geom_inf_plot = geom if positif else None
-geom_sup_plot = geom if not positif else None
+geom_inf_plot = geom if positif else geom_c
+geom_sup_plot = geom_c if positif else geom
 
 if res["deformation_ELU"] is not None:
     fig_complet = fs.schema_ELU_complet(section, fck, fyk, res["deformation_ELU"],
@@ -228,6 +294,9 @@ df = pd.DataFrame([
     ("Axe neutre élastique (ELS) x", f"{res['ELS_contraintes']['detail']['x']*1000:.1f} mm"),
     ("As,min ELU", f"{res['aciers_minimaux']['As_min_ELU']*1e4:.2f} cm²"),
     ("As,min ELS / fissuration", f"{res['aciers_minimaux']['As_min_ELS']*1e4:.2f} cm²"),
+    ("εsm (déformation moyenne acier)", f"{res['fissuration']['detail']['eps_sm']*1e3:.3f} ‰"),
+    ("εcm (déformation moyenne béton tendu)", f"{res['fissuration']['detail']['eps_cm']*1e3:.3f} ‰"),
+    ("εsm − εcm", f"{res['fissuration']['detail']['esm_ecm']*1e3:.3f} ‰"),
     ("wk", f"{res['fissuration']['wk']:.3f} mm"),
     ("sr,max", f"{res['fissuration']['detail']['sr_max']:.1f} mm"),
 ], columns=["Grandeur", "Valeur"])
@@ -236,8 +305,8 @@ st.dataframe(df, hide_index=True, width="stretch")
 st.markdown("---")
 st.subheader("Export")
 import tempfile
-geom_inf_pdf = geom if positif else None
-geom_sup_pdf = geom if not positif else None
+geom_inf_pdf = geom if positif else geom_c
+geom_sup_pdf = geom_c if positif else geom
 with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
     fs.generer_rapport_pdf(
         res, section, fck, fyk, M_ELS, gamma_c=gamma_c, gamma_s=gamma_s,

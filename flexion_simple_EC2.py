@@ -645,8 +645,16 @@ def ouverture_fissure(section, fck, M_ELS_kNm, nb_barres_tendues, phi_barre_mm,
     kt = coeffs["kt_court_terme"] if duree_chargement == "court_terme" else coeffs["kt_long_terme"]
     alpha_e = n_eq
 
-    esm_ecm = (sigma_s - kt * (fct_eff / rho_p_eff) * (1 + alpha_e * rho_p_eff)) / Es
-    esm_ecm = max(esm_ecm, 0.6 * sigma_s / Es)   # borne basse (7.9)
+    # εsm : déformation moyenne de l'armature (acier seul, section fissurée)
+    # εcm : déformation moyenne du béton tendu entre fissures — la formule
+    # (7.9) de l'EC2 ne donne QUE la différence (εsm-εcm) ; on la décompose
+    # ici en εsm = σs/Es (déformation "nue" de l'acier) et on en déduit εcm
+    # par différence, y compris lorsque la borne basse 0,6.σs/Es de (7.9)
+    # est active (cf. NOTE ci-dessous).
+    eps_sm = sigma_s / Es
+    esm_ecm_brut = (sigma_s - kt * (fct_eff / rho_p_eff) * (1 + alpha_e * rho_p_eff)) / Es
+    esm_ecm = max(esm_ecm_brut, 0.6 * sigma_s / Es)   # borne basse (7.9)
+    eps_cm = eps_sm - esm_ecm
 
     # Espacement des barres (entraxe) — indicatif, conservé pour le rapport,
     # mais NE PILOTE PLUS le choix de formule (cf. correction ANF ci-dessous)
@@ -679,11 +687,46 @@ def ouverture_fissure(section, fck, M_ELS_kNm, nb_barres_tendues, phi_barre_mm,
     wk = sr_max * esm_ecm
 
     return dict(wk=wk * 1000, sr_max=sr_max * 1000, esm_ecm=esm_ecm,
+                eps_sm=eps_sm, eps_cm=eps_cm,
                 sigma_s=sigma_s, rho_p_eff=rho_p_eff, Ac_eff=Ac_eff,
                 hc_ef=hc_ef, x=x, formule=formule, entraxe=entraxe * 1000,
                 limite_entraxe=limite_entraxe * 1000,
                 sr_max_7_11=sr_max_7_11 * 1000, sr_max_7_14=sr_max_7_14 * 1000,
                 k3=k3)
+
+
+def nb_barres_pour_fissure(section, fck, M_ELS_kNm, phi_barre_mm, wmax,
+                            gamma_c=1.5, gamma_s=1.15, n_impose=None,
+                            duree_chargement="long_terme", nb_max=60):
+    """
+    Calcul ITÉRATIF du nombre minimal de barres (diamètre fixé) de la
+    nappe RÉELLEMENT TENDUE (nappe inf. si M_ELS≥0, nappe sup. sinon) tel
+    que l'ouverture de fissure wk respecte la limite wmax (§7.3.4).
+
+    Incrémentation entière depuis nb=1 (le nombre de barres est discret,
+    pas de recherche continue pertinente ici) — chaque itération relance
+    le calcul exact (axe neutre élastique, Ac,eff, sr,max) pour ce nombre
+    de barres, donc pas une simple mise à l'échelle de As.
+
+    Retourne dict(nb_barres_requis, As_requis, wk_obtenu, converge)
+    """
+    positif = M_ELS_kNm >= 0
+    resultat = None
+    for nb in range(2, nb_max + 1):
+        As_trial = nb * np.pi * (phi_barre_mm / 1000 / 2) ** 2
+        sec2 = dict(section)
+        if positif:
+            sec2["As_inf"] = As_trial
+        else:
+            sec2["As_sup"] = As_trial
+        fiss = ouverture_fissure(sec2, fck, M_ELS_kNm, nb, phi_barre_mm,
+                                  duree_chargement=duree_chargement, n_impose=n_impose)
+        resultat = dict(nb_barres_requis=nb, As_requis=As_trial,
+                        wk_obtenu=fiss["wk"], converge=True)
+        if fiss["wk"] <= wmax:
+            return resultat
+    resultat["converge"] = False
+    return resultat
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -696,7 +739,8 @@ def justifier_flexion_simple(section, fck, fyk,
                               classe_exposition="XC1",
                               gamma_c=1.5, gamma_s=1.15,
                               duree_chargement="long_terme",
-                              n_impose=None):
+                              n_impose=None,
+                              wmax_override=None):
     """
     Justification complète d'une section rectangulaire en flexion simple :
     moment réduit µ / besoin d'aciers comprimés, capacité ELU, état de
@@ -708,6 +752,11 @@ def justifier_flexion_simple(section, fck, fyk,
     pour les calculs ELS (contraintes, ouverture de fissure, As théorique
     ELS). None (défaut) = calcul précis n=Es/Ecm(fck) ; une valeur
     forfaitaire usuelle est n=15 (cf. cahier des charges).
+
+    wmax_override : limite d'ouverture de fissure à utiliser directement
+    (mm), à la place de la valeur déduite de classe_exposition — permet
+    de fixer des limites différentes sur la nappe haute et la nappe basse
+    (cf. cahier des charges). None (défaut) = valeur du Tableau 7.1NF.
 
     Retourne un dict structuré avec tous les résultats + verdicts booléens.
     """
@@ -764,7 +813,7 @@ def justifier_flexion_simple(section, fck, fyk,
         detail_ELU=amin_elu, detail_ELS=amin_els)
 
     # --- Ouverture de fissure ---
-    wmax = WMAX_TABLE.get(classe_exposition, 0.3)
+    wmax = wmax_override if wmax_override is not None else WMAX_TABLE.get(classe_exposition, 0.3)
     fiss = ouverture_fissure(section, fck, M_ELS_kNm, nb_barres_tendues,
                               phi_barre_mm, duree_chargement=duree_chargement,
                               n_impose=n_impose)
