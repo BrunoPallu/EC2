@@ -448,7 +448,7 @@ def dessiner_section(ax_sec, ax_info, section_type, section_params, mat, arma, A
         b_s, h_s = section_params["b"], section_params["h"]
         c_inf_s, c_sup_s = section_params["c_inf"], section_params["c_sup"]
         As_inf_s, As_sup_s = section_params["As_inf"], section_params["As_sup"]
-        sc = 0.46 / max(b_s, h_s)
+        sc = 0.56 / max(b_s, h_s)
         bS, hS = b_s * sc, h_s * sc
         rect = mpatches.FancyBboxPatch((-bS/2, -hS/2), bS, hS,
                                         boxstyle="square,pad=0",
@@ -486,7 +486,7 @@ def dessiner_section(ax_sec, ax_info, section_type, section_params, mat, arma, A
         _draw_nappe(y_sup, As_sup_s, section_params.get("nb_sup"))
         _draw_nappe(y_inf, As_inf_s, section_params.get("nb_inf"))
 
-        # Cotes
+        # Cotes b, h
         ax_sec.annotate("", xy=(bS/2+0.07,-hS/2), xytext=(bS/2+0.07, hS/2),
                         arrowprops=dict(arrowstyle="<->",color="#333",lw=1.0))
         ax_sec.text(bS/2+0.14, 0, f"h={h_s*100:.0f}cm",
@@ -495,6 +495,18 @@ def dessiner_section(ax_sec, ax_info, section_type, section_params, mat, arma, A
                         arrowprops=dict(arrowstyle="<->",color="#333",lw=1.0))
         ax_sec.text(0, -hS/2-0.14, f"b={b_s*100:.0f}cm",
                     ha="center", fontsize=7.5)
+
+        # Cotes d'enrobage (haut et bas), sur le côté gauche — distinctes
+        # si c_sup ≠ c_inf.
+        COL_ENR = "#2E7D32"
+        ax_sec.annotate("", xy=(-bS/2-0.06, hS/2), xytext=(-bS/2-0.06, y_sup),
+                        arrowprops=dict(arrowstyle="<->", color=COL_ENR, lw=1.0))
+        ax_sec.text(-bS/2-0.09, (hS/2+y_sup)/2, f"c_sup={c_sup_s*100:.1f}cm",
+                    fontsize=6.5, color=COL_ENR, ha="right", va="center", fontweight="bold")
+        ax_sec.annotate("", xy=(-bS/2-0.06, -hS/2), xytext=(-bS/2-0.06, y_inf),
+                        arrowprops=dict(arrowstyle="<->", color=COL_ENR, lw=1.0))
+        ax_sec.text(-bS/2-0.09, (-hS/2+y_inf)/2, f"c_inf={c_inf_s*100:.1f}cm",
+                    fontsize=6.5, color=COL_ENR, ha="right", va="center", fontweight="bold")
 
         box_beton = (f" fck=C{mat['fck']:.0f}   fcd={mat['fcd']:.1f} MPa\n"
                      f" εcu2={mat['eps_cu2']*1e3:.1f}‰   εc2={mat['eps_c2']*1e3:.1f}‰")
@@ -523,6 +535,18 @@ def dessiner_section(ax_sec, ax_info, section_type, section_params, mat, arma, A
                         arrowprops=dict(arrowstyle="<->",color="#333",lw=1.0))
         ax_sec.text(R_d+0.14, 0, f"Ø{D_s*100:.0f}cm",
                     va="center", fontsize=7.5, rotation=90)
+
+        # Cote de l'enrobage : segment radial du bord jusqu'au cercle des
+        # aciers, place a mi-chemin entre deux barres pour ne jamais les
+        # chevaucher, quel que soit nb.
+        a_enr = np.pi/2 + np.pi/nb
+        x_ext, y_ext = R_d*np.cos(a_enr), R_d*np.sin(a_enr)
+        x_int, y_int = Rs_d*np.cos(a_enr), Rs_d*np.sin(a_enr)
+        ax_sec.annotate("", xy=(x_int, y_int), xytext=(x_ext, y_ext),
+                        arrowprops=dict(arrowstyle="<->", color="#2E7D32", lw=1.1))
+        x_lbl, y_lbl = (R_d+0.09)*np.cos(a_enr), (R_d+0.09)*np.sin(a_enr)
+        ax_sec.text(x_lbl, y_lbl, f"c={c_e*100:.1f}cm", fontsize=7,
+                    color="#2E7D32", ha="center", va="center", fontweight="bold")
 
         box_beton = (f" fck=C{mat['fck']:.0f}   fcd={mat['fcd']:.1f} MPa\n"
                      f" εcu2={mat['eps_cu2']*1e3:.1f}‰   εc2={mat['eps_c2']*1e3:.1f}‰")
