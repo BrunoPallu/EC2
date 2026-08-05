@@ -182,6 +182,7 @@ def geometrie_nappe(h, enrobage_nominal, nb_barres_par_lit, phi_mm,
 # ═══════════════════════════════════════════════════════════════
 
 def capacite_ELU_flexion_simple(section, fck, fyk, gamma_c=1.5, gamma_s=1.15,
+                                 classe_acier="B", avec_ecrouissage=False,
                                  n_div=400, n_piv_A=200, n_piv_B=300, n_piv_C=150):
     """
     Moment résistant ELU en flexion simple (N=0), positif et négatif,
@@ -189,6 +190,8 @@ def capacite_ELU_flexion_simple(section, fck, fyk, gamma_c=1.5, gamma_s=1.15,
 
     section : dict(b, h, c_inf, c_sup, As_inf, As_sup)  [mêmes clés que
               diagramme_interaction_EC2.diagramme_interaction]
+    classe_acier, avec_ecrouissage : cf. get_material_params() —
+      NF EN 1992-1-1 Figure 3.8 et Annexe C.
 
     Retourne dict(M_Rd_pos, M_Rd_neg, mat, pts_cles, N_arr, M_arr, zones,
                   fibres, arma, Ac, H)
@@ -197,6 +200,7 @@ def capacite_ELU_flexion_simple(section, fck, fyk, gamma_c=1.5, gamma_s=1.15,
      ) = ec2.diagramme_interaction(
         section_type="rect", section_params=section,
         fck=fck, fyk=fyk, gamma_c=gamma_c, gamma_s=gamma_s,
+        classe_acier=classe_acier, avec_ecrouissage=avec_ecrouissage,
         n_div=n_div, n_piv_A=n_piv_A, n_piv_B=n_piv_B, n_piv_C=n_piv_C)
 
     # Interpolation des points où N_arr change de signe (contour fermé,
@@ -219,7 +223,7 @@ def capacite_ELU_flexion_simple(section, fck, fyk, gamma_c=1.5, gamma_s=1.15,
 
 
 def moment_reduit(section, fck, fyk, M_ELU_kNm, gamma_c=1.5, gamma_s=1.15,
-                   n_div=400):
+                   classe_acier="B", avec_ecrouissage=False, n_div=400):
     """
     Moment réduit µ = M_Ed/(b.d².fcd) et sa valeur limite µlim (frontière
     pivot B "pur" — acier tendu à εyd pile au moment où le béton atteint
@@ -232,13 +236,20 @@ def moment_reduit(section, fck, fyk, M_ELU_kNm, gamma_c=1.5, gamma_s=1.15,
     λ=0,8/η=1,0, plus approximative) : on intègre le béton seul (sans
     acier) sur la hauteur comprimée x_lim = d.εcu2/(εcu2+εyd), et on
     ramène le moment de la résultante béton au niveau des aciers tendus.
+    (µlim ne dépend pas de la classe/écrouissage acier : c'est la
+    frontière où l'acier atteint tout juste εyd, avant toute distinction
+    entre branches.)
+
+    classe_acier, avec_ecrouissage : cf. get_material_params() —
+      NF EN 1992-1-1 Figure 3.8 et Annexe C.
 
     Retourne dict(mu, mu_lim, x_lim, d, besoin_aciers_comprimes, M_lim)
     """
     b, h, c_inf = section["b"], section["h"], section["c_inf"]
     d = h - c_inf
 
-    mat = ec2.get_material_params(fck, fyk, gamma_c, gamma_s)
+    mat = ec2.get_material_params(fck, fyk, gamma_c, gamma_s,
+                                  classe_acier=classe_acier, avec_ecrouissage=avec_ecrouissage)
     fcd = mat["fcd"] ;  ecu2 = mat["eps_cu2"] ;  eps_yd = mat["eps_yd"]
 
     # x_lim : frontière pivot B pur, mesurée depuis la fibre sup. comprimée
@@ -283,6 +294,7 @@ def _moment_beton_seul(x, h, fibres, mat, d):
 
 
 def acier_theorique_ELU(section, fck, fyk, M_ELU_kNm, gamma_c=1.5, gamma_s=1.15,
+                         classe_acier="B", avec_ecrouissage=False,
                          methode="approximation", n_div=400, tol=1e-6, max_iter=60):
     """
     Calcule la section d'acier théoriquement NÉCESSAIRE pour équilibrer
@@ -314,13 +326,18 @@ def acier_theorique_ELU(section, fck, fyk, M_ELU_kNm, gamma_c=1.5, gamma_s=1.15,
 
     Retourne dict(As_theorique, As1, As2, As_comprime_theorique, x, cas, methode)
     où cas ∈ {"simple", "double"}.
+
+    NOTE : la méthode "approximation" (formule fermée α/z) suppose
+    toujours l'acier tendu plastifié à fyd — elle ne tient PAS compte de
+    avec_ecrouissage (qui n'affecte que la méthode "exacte").
     """
     b, h, c_inf = section["b"], section["h"], section["c_inf"]
     c_sup = section["c_sup"]
     d = h - c_inf
     d_prime = c_sup
 
-    mat = ec2.get_material_params(fck, fyk, gamma_c, gamma_s)
+    mat = ec2.get_material_params(fck, fyk, gamma_c, gamma_s,
+                                  classe_acier=classe_acier, avec_ecrouissage=avec_ecrouissage)
     fcd = mat["fcd"]
     fyd = mat["fyd"] ;  ecu2 = mat["eps_cu2"] ;  eps_yd = mat["eps_yd"]
     fibres = ec2.fibres_rect(b, h, n_div)
@@ -396,6 +413,7 @@ def acier_theorique_ELU(section, fck, fyk, M_ELU_kNm, gamma_c=1.5, gamma_s=1.15,
 
 def etat_deformation_ELU(section, fck, fyk, gamma_c=1.5, gamma_s=1.15,
                           M_ELU_kNm=None, methode="approximation",
+                          classe_acier="B", avec_ecrouissage=False,
                           n_div=400, tol=1e-6, max_iter=60):
     """
     Détermine l'état de déformation réel à l'ELU pour le ferraillage donné
@@ -426,12 +444,16 @@ def etat_deformation_ELU(section, fck, fyk, gamma_c=1.5, gamma_s=1.15,
 
     Retourne dict(eps_top, eps_bot, x, eps_sc, eps_st, y_sup, y_inf, N, M,
     methode) ou None si aucune racine trouvée dans le domaine pivot B.
+
+    classe_acier, avec_ecrouissage : cf. get_material_params() —
+      NF EN 1992-1-1 Figure 3.8 et Annexe C.
     """
     b, h = section["b"], section["h"]
     c_inf, c_sup = section["c_inf"], section["c_sup"]
     As_inf, As_sup = section["As_inf"], section["As_sup"]
 
-    mat = ec2.get_material_params(fck, fyk, gamma_c, gamma_s)
+    mat = ec2.get_material_params(fck, fyk, gamma_c, gamma_s,
+                                  classe_acier=classe_acier, avec_ecrouissage=avec_ecrouissage)
     ecu2 = mat["eps_cu2"] ;  eud = mat["eps_ud"]
     positif = (M_ELU_kNm is None) or (M_ELU_kNm >= 0)
 
@@ -914,7 +936,8 @@ def justifier_flexion_simple(section, fck, fyk,
                               duree_chargement="long_terme",
                               n_impose=None,
                               wmax_override=None,
-                              methode_ELU="approximation"):
+                              methode_ELU="approximation",
+                              classe_acier="B", avec_ecrouissage=False):
     """
     Justification complète d'une section rectangulaire en flexion simple :
     moment réduit µ / besoin d'aciers comprimés, capacité ELU, état de
@@ -928,6 +951,11 @@ def justifier_flexion_simple(section, fck, fyk,
     cf. acier_theorique_ELU() pour le détail. N'affecte que le calcul
     de l'As théorique ELU (dimensionnement) ; la vérification de
     capacité M_Rd reste toujours calculée par intégration exacte.
+
+    classe_acier : "A", "B" (défaut) ou "C" — NF EN 1992-1-1 Annexe C,
+    Tableau C.1 (normative).
+    avec_ecrouissage : False (défaut, palier horizontal) ou True (branche
+    supérieure inclinée avec écrouissage) — NF EN 1992-1-1 Figure 3.8.
 
     n_impose : coefficient d'équivalence acier/béton n=Es/Ec à utiliser
     pour les calculs ELS (contraintes, ouverture de fissure, As théorique
@@ -944,12 +972,14 @@ def justifier_flexion_simple(section, fck, fyk,
     resultats = {}
 
     # --- Moment réduit / besoin d'aciers comprimés ---
-    mr = moment_reduit(section, fck, fyk, M_ELU_kNm, gamma_c, gamma_s)
+    mr = moment_reduit(section, fck, fyk, M_ELU_kNm, gamma_c, gamma_s,
+                       classe_acier=classe_acier, avec_ecrouissage=avec_ecrouissage)
     resultats["moment_reduit"] = mr
 
     # --- Acier théorique nécessaire à l'ELU (dimensionnement) ---
     resultats["acier_theorique"] = acier_theorique_ELU(
-        section, fck, fyk, M_ELU_kNm, gamma_c, gamma_s, methode=methode_ELU)
+        section, fck, fyk, M_ELU_kNm, gamma_c, gamma_s,
+        classe_acier=classe_acier, avec_ecrouissage=avec_ecrouissage, methode=methode_ELU)
 
     # --- Acier théorique nécessaire à l'ELS (dimensionnement, §7.2) ---
     resultats["acier_theorique_ELS"] = acier_theorique_ELS(
@@ -957,7 +987,8 @@ def justifier_flexion_simple(section, fck, fyk,
 
     # --- État de déformation ELU (pour le diagramme, et pour M_Rd si methode_ELU="approximation") ---
     etat = etat_deformation_ELU(section, fck, fyk, gamma_c, gamma_s, M_ELU_kNm,
-                                 methode=methode_ELU)
+                                 methode=methode_ELU,
+                                 classe_acier=classe_acier, avec_ecrouissage=avec_ecrouissage)
     resultats["deformation_ELU"] = etat  # peut être None si pivot A gouverne
 
     # --- ELU (capacité) ---
@@ -971,7 +1002,8 @@ def justifier_flexion_simple(section, fck, fyk,
         M_Rd = etat["M"]
         elu_detail = dict(methode="approximation", x=etat["x"])
     else:
-        elu = capacite_ELU_flexion_simple(section, fck, fyk, gamma_c, gamma_s)
+        elu = capacite_ELU_flexion_simple(section, fck, fyk, gamma_c, gamma_s,
+                                          classe_acier=classe_acier, avec_ecrouissage=avec_ecrouissage)
         M_Rd = elu["M_Rd_pos"] if M_ELU_kNm >= 0 else elu["M_Rd_neg"]
         elu_detail = elu
     resultats["ELU"] = dict(
@@ -1296,6 +1328,7 @@ def lambda_eta_EC2(fck):
 
 
 def schema_bloc_rectangulaire(section, fck, fyk, etat, gamma_c=1.5, gamma_s=1.15,
+                               classe_acier="B", avec_ecrouissage=False,
                                nom_fichier=None):
     """
     Reproduit le schéma classique du cours (section / diagramme des
@@ -1315,7 +1348,8 @@ def schema_bloc_rectangulaire(section, fck, fyk, etat, gamma_c=1.5, gamma_s=1.15
     c_inf, c_sup = section["c_inf"], section["c_sup"]
     As_inf, As_sup = section["As_inf"], section["As_sup"]
 
-    mat = ec2.get_material_params(fck, fyk, gamma_c, gamma_s)
+    mat = ec2.get_material_params(fck, fyk, gamma_c, gamma_s,
+                              classe_acier=classe_acier, avec_ecrouissage=avec_ecrouissage)
     fcd = mat["fcd"]
     lam, eta = lambda_eta_EC2(fck)
 
@@ -1459,6 +1493,7 @@ def schema_bloc_rectangulaire(section, fck, fyk, etat, gamma_c=1.5, gamma_s=1.15
 
 
 def efforts_bloc_rectangulaire(section, fck, fyk, etat, gamma_c=1.5, gamma_s=1.15,
+                                classe_acier="B", avec_ecrouissage=False,
                                 geom_inf=None, geom_sup=None):
     """
     Calcule les efforts internes du bloc de contraintes rectangulaire
@@ -1478,7 +1513,8 @@ def efforts_bloc_rectangulaire(section, fck, fyk, etat, gamma_c=1.5, gamma_s=1.1
     c_inf, c_sup = section["c_inf"], section["c_sup"]
     As_inf, As_sup = section["As_inf"], section["As_sup"]
 
-    mat = ec2.get_material_params(fck, fyk, gamma_c, gamma_s)
+    mat = ec2.get_material_params(fck, fyk, gamma_c, gamma_s,
+                              classe_acier=classe_acier, avec_ecrouissage=avec_ecrouissage)
     fcd = mat["fcd"]
     lam, eta = lambda_eta_EC2(fck)
 
@@ -1527,6 +1563,7 @@ def efforts_bloc_rectangulaire(section, fck, fyk, etat, gamma_c=1.5, gamma_s=1.1
 
 
 def schema_ELU_complet(section, fck, fyk, etat, gamma_c=1.5, gamma_s=1.15,
+                        classe_acier="B", avec_ecrouissage=False,
                         geom_inf=None, geom_sup=None, nom_fichier=None):
     """
     Figure UNIQUE (format A3 paysage) réunissant les 3 panneaux : section
@@ -1559,6 +1596,7 @@ def schema_ELU_complet(section, fck, fyk, etat, gamma_c=1.5, gamma_s=1.15,
     eps_bot_extreme = etat["eps_bot"]
 
     ef = efforts_bloc_rectangulaire(section, fck, fyk, etat, gamma_c, gamma_s,
+                                     classe_acier=classe_acier, avec_ecrouissage=avec_ecrouissage,
                                      geom_inf=geom_inf, geom_sup=geom_sup)
     d = ef["d"] ;  eps_s = ef["eps_s"] ;  y_acier_t = ef["y_acier_t"]
     As_c_total = ef["As_c_total"] ;  d_prime_reel = ef["d_prime"]
@@ -1567,7 +1605,8 @@ def schema_ELU_complet(section, fck, fyk, etat, gamma_c=1.5, gamma_s=1.15,
     Fc = ef["Fc"] ;  Fs = ef["Fs"] ;  Fsc = ef["Fsc"]
     sigma_s = ef["sigma_s"] ;  sigma_sc = ef["sigma_sc"]
     z = ef["z"] ;  Mu = ef["Mu"]
-    mat = ec2.get_material_params(fck, fyk, gamma_c, gamma_s)
+    mat = ec2.get_material_params(fck, fyk, gamma_c, gamma_s,
+                              classe_acier=classe_acier, avec_ecrouissage=avec_ecrouissage)
     fcd = mat["fcd"]
 
     def _eps_a(y):
@@ -1757,6 +1796,7 @@ def schema_ELU_complet(section, fck, fyk, etat, gamma_c=1.5, gamma_s=1.15,
 # ═══════════════════════════════════════════════════════════════
 
 def generer_rapport_pdf(resultats, section, fck, fyk, M_ELS_kNm, gamma_c=1.5, gamma_s=1.15,
+                         classe_acier="B", avec_ecrouissage=False,
                          geom_inf=None, geom_sup=None,
                          nom_projet="", partie_ouvrage="",
                          nom_fichier="rapport_flexion_simple_EC2.pdf"):
@@ -1819,10 +1859,13 @@ def generer_rapport_pdf(resultats, section, fck, fyk, M_ELS_kNm, gamma_c=1.5, ga
         methode_lbl = ("approximation (bloc λ/η, EC2 §3.1.7(3) éq.3.19-3.20)"
                        if at_u.get('methode', 'approximation') == 'approximation'
                        else "exacte (parabole-rectangle intégrée)")
+        ecr_lbl = ("avec écrouissage (branche inclinée, Fig. 3.8)" if avec_ecrouissage
+                  else "sans écrouissage (palier horizontal, Fig. 3.8)")
         hyp = (
             f"BÉTON / ACIER\n"
             f"  Classe béton                 fck = {fck:.0f} MPa\n"
-            f"  Acier                         fyk = {fyk:.0f} MPa\n"
+            f"  Acier                         fyk = {fyk:.0f} MPa   classe {classe_acier} (Annexe C)\n"
+            f"  Loi acier                     {ecr_lbl}\n"
             f"  Coefficients partiels         γc = {gamma_c:.2f}   γs = {gamma_s:.2f}\n"
             f"  Coeff. équivalence ELS        n = {els['detail']['n']:.2f}\n"
             f"  Méthode intégration ELU       {methode_lbl}\n\n"
@@ -1875,6 +1918,7 @@ def generer_rapport_pdf(resultats, section, fck, fyk, M_ELS_kNm, gamma_c=1.5, ga
         etat = resultats["deformation_ELU"]
         if etat is not None:
             fig2 = schema_ELU_complet(section, fck, fyk, etat, gamma_c, gamma_s,
+                                      classe_acier=classe_acier, avec_ecrouissage=avec_ecrouissage,
                                       geom_inf=geom_inf, geom_sup=geom_sup)
             pdf.savefig(fig2) ;  plt.close(fig2)
         elif geom_inf is not None or geom_sup is not None:

@@ -36,6 +36,18 @@ with st.sidebar:
     gamma_c = col_g1.number_input("γc", value=1.5, step=0.05, format="%.2f")
     gamma_s = col_g2.number_input("γs", value=1.15, step=0.05, format="%.2f")
 
+    classe_acier = st.selectbox("Classe de ductilité de l'acier", ["A", "B", "C"], index=1,
+                                 help="NF EN 1992-1-1, Annexe C (normative), Tableau C.1 : "
+                                      "A→εuk≥2,5% k≥1,05 ; B→εuk≥5,0% k≥1,08 ; C→εuk≥7,5% k≥1,15. "
+                                      "Défaut B (aciers HA courants en France).")
+    avec_ecrouissage = st.checkbox("Avec écrouissage (branche inclinée)", value=False,
+                                    help="NF EN 1992-1-1, Figure 3.8. Décoché (défaut) : palier "
+                                         "horizontal, σs=fyd au-delà de εyd, quelle que soit la "
+                                         "classe — hypothèse simplifiée, du côté de la sécurité. "
+                                         "Coché : branche supérieure inclinée, σs croît jusqu'à "
+                                         "k·fyk à εuk — exploite la surrésistance garantie de la "
+                                         "classe choisie, plus précis mais moins conservateur.")
+
     n_auto = st.checkbox("Calculer n=Es/Ecm(fck) automatiquement", value=False,
                           help="Décoché (défaut) : utilise la valeur forfaitaire n ci-dessous "
                                "(usuellement 15). Coché : calcul précis à partir de Ecm(fck), "
@@ -167,7 +179,8 @@ try:
         duree_chargement=duree,
         n_impose=n_impose,
         wmax_override=wmax_actif,
-        methode_ELU=methode_ELU)
+        methode_ELU=methode_ELU,
+        classe_acier=classe_acier, avec_ecrouissage=avec_ecrouissage)
 except Exception as e:
     st.error(f"Erreur de calcul : {type(e).__name__} — {e}")
     st.stop()
@@ -269,10 +282,12 @@ geom_sup_plot = geom_c if positif else geom
 if res["deformation_ELU"] is not None:
     fig_complet = fs.schema_ELU_complet(section, fck, fyk, res["deformation_ELU"],
                                          gamma_c=gamma_c, gamma_s=gamma_s,
+                                         classe_acier=classe_acier, avec_ecrouissage=avec_ecrouissage,
                                          geom_inf=geom_inf_plot, geom_sup=geom_sup_plot)
     st.pyplot(fig_complet, width="stretch")
     d = res["deformation_ELU"]
     ef = fs.efforts_bloc_rectangulaire(section, fck, fyk, d, gamma_c=gamma_c, gamma_s=gamma_s,
+                                        classe_acier=classe_acier, avec_ecrouissage=avec_ecrouissage,
                                         geom_inf=geom_inf_plot, geom_sup=geom_sup_plot)
 
     col_i1, col_i2, col_i3 = st.columns(3)
@@ -333,6 +348,7 @@ geom_sup_pdf = geom_c if positif else geom
 with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
     fs.generer_rapport_pdf(
         res, section, fck, fyk, M_ELS, gamma_c=gamma_c, gamma_s=gamma_s,
+        classe_acier=classe_acier, avec_ecrouissage=avec_ecrouissage,
         geom_inf=geom_inf_pdf, geom_sup=geom_sup_pdf,
         nom_projet=nom_projet, partie_ouvrage=partie_ouvrage,
         nom_fichier=tmp.name)

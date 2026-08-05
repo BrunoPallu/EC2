@@ -61,7 +61,8 @@ _ETAT_GUI = {}
 # 1.  PARAMÈTRES MATÉRIAUX EC2
 # ═══════════════════════════════════════════════════════════════
 
-def get_material_params(fck_MPa, fyk_MPa=500.0, gamma_c=1.5, gamma_s=1.15):
+def get_material_params(fck_MPa, fyk_MPa=500.0, gamma_c=1.5, gamma_s=1.15,
+                         classe_acier="B", avec_ecrouissage=False):
     """
     Paramètres matériaux selon EC2 tableau 3.1 / §3.2.
 
@@ -69,10 +70,28 @@ def get_material_params(fck_MPa, fyk_MPa=500.0, gamma_c=1.5, gamma_s=1.15):
       (valeurs usuelles EC2 : 1,5 pour le béton, 1,15 pour l'acier —
       modifiables si besoin, p.ex. combinaisons accidentelles).
 
+    classe_acier : "A", "B" ou "C" — classe de ductilité de l'armature,
+      NF EN 1992-1-1 Annexe C (normative), Tableau C.1. Valeurs
+      recommandées (caractéristiques minimales garanties) :
+        A : εuk ≥ 2,5 %  (25‰)   k = (ft/fy)k ≥ 1,05
+        B : εuk ≥ 5,0 %  (50‰)   k = (ft/fy)k ≥ 1,08
+        C : εuk ≥ 7,5 %  (75‰)   k = (ft/fy)k ≥ 1,15  (≤1,35)
+      Défaut : "B" (classe la plus courante en France, aciers HA).
+
+    avec_ecrouissage : False (défaut) — palier horizontal, sans limite
+      de déformation (branche B du diagramme, EC2 Figure 3.8) : σs=fyd
+      dès que |ε|>εyd, quelle que soit la classe choisie. C'est la
+      simplification usuelle, du côté de la sécurité.
+      True — branche supérieure inclinée AVEC écrouissage, limitée à
+      εud=0,9·εuk (branche A du diagramme, EC2 Figure 3.8) : σs croît
+      linéairement de fyd (à εyd) jusqu'à k·fyk (à εuk), plus précise
+      mais exploite la surrésistance garantie de la classe choisie.
+
+    Références normatives : NF EN 1992-1-1 Figure 3.8 (diagrammes
+    contrainte-déformation de calcul de l'acier) et Annexe C (normative),
+    Tableau C.1 (propriétés des armatures compatibles avec l'EC2).
+
     Retourne un dict avec toutes les grandeurs utiles.
-    La valeur εud du cours ENPC est 45‰ (pivot A) ; on conserve aussi
-    εud_acier = 22.7‰ pour la capacité de déformation de l'acier seul
-    (branche inclinée non utilisée ici, on prend le palier horizontal).
     """
     gc = gamma_c ;  gs = gamma_s
     fcd = fck_MPa / gc
@@ -88,13 +107,27 @@ def get_material_params(fck_MPa, fyk_MPa=500.0, gamma_c=1.5, gamma_s=1.15):
         eps_c2  = (2.0 + 0.085 * (fck_MPa - 50) ** 0.53) * 1e-3
         eps_cu2 = (2.6 + 35.0 * ((90 - fck_MPa) / 100) ** 4) * 1e-3
 
+    # NF EN 1992-1-1 Annexe C, Tableau C.1 — valeurs recommandées
+    TABLE_C1 = {
+        "A": dict(euk=25.0e-3, k=1.05),
+        "B": dict(euk=50.0e-3, k=1.08),
+        "C": dict(euk=75.0e-3, k=1.15),
+    }
+    classe_acier = classe_acier.upper()
+    if classe_acier not in TABLE_C1:
+        raise ValueError(f"classe_acier doit être 'A', 'B' ou 'C' (reçu {classe_acier!r})")
+    eps_uk = TABLE_C1[classe_acier]["euk"]
+    k_ecr  = TABLE_C1[classe_acier]["k"]
+
     eps_yd  = fyd / Es        # déformation de plastification acier
-    eps_ud  = 45.0e-3         # déformation limite acier PIVOT A  (cours ENPC §13)
+    eps_ud  = 0.9 * eps_uk    # EC2 §3.2.7(2) : εud = 0,9.εuk (pivot A)
 
     return dict(fck=fck_MPa, fcd=fcd, fyk=fyk_MPa, fyd=fyd, Es=Es,
                 n=n, eps_c2=eps_c2, eps_cu2=eps_cu2,
                 eps_yd=eps_yd, eps_ud=eps_ud,
-                gamma_c=gc, gamma_s=gs)
+                gamma_c=gc, gamma_s=gs,
+                classe_acier=classe_acier, eps_uk=eps_uk, k_ecrouissage=k_ecr,
+                avec_ecrouissage=avec_ecrouissage)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -115,16 +148,33 @@ def sigma_c(eps, mat):
 
 def sigma_s(eps, mat):
     """
-    Contrainte acier [MPa] — loi bilinéaire EC2 §3.2.7.
+    Contrainte acier [MPa] — loi bilinéaire EC2 §3.2.7, Figure 3.8.
     Convention algébrique : eps > 0 = COMPRESSION, eps < 0 = TRACTION.
-    Palier plastique jusqu'à εud (= 45‰, pivot A).
+
+    Deux branches possibles au-delà de εyd, selon mat["avec_ecrouissage"] :
+      False (défaut) — branche B (palier horizontal, sans limite de
+        déformation) : σs = fyd dès que |ε|>εyd.
+      True — branche A (branche supérieure inclinée avec écrouissage,
+        limitée à εud=0,9.εuk) : σs croît linéairement jusqu'à
+        k.fyk à εuk (Annexe C, Tableau C.1 pour k et εuk).
+
+    Au-delà de εud : rupture (0.0) — ne doit normalement pas être
+    atteint, le diagramme est construit pour s'arrêter à εud (pivot A).
     """
     Es, fyd, eud = mat["Es"], mat["fyd"], mat["eps_ud"]
     sg = np.sign(eps) if eps != 0 else 1.0
     ae = abs(eps)
-    if   ae <= fyd / Es : return Es * eps     # domaine élastique
-    elif ae <= eud      : return sg * fyd     # palier plastique
-    else                : return 0.0          # hors pivot A (ne doit pas arriver)
+    eps_yd = fyd / Es
+    if ae <= eps_yd:
+        return Es * eps                          # domaine élastique
+    if ae > eud:
+        return 0.0                                # hors pivot A (ne doit pas arriver)
+    if not mat.get("avec_ecrouissage", False):
+        return sg * fyd                           # branche B : palier horizontal
+    # branche A : montée linéaire jusqu'à k.fyk à εuk (EC2 Figure 3.8)
+    fyk = mat["fyk"] ;  k = mat["k_ecrouissage"] ;  euk = mat["eps_uk"]
+    ae_capee = min(ae, eud)
+    return sg * fyd * (1.0 + (k - 1.0) * (ae_capee - eps_yd) / (euk - eps_yd))
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -295,6 +345,7 @@ def armatures_circ(D, c_enr, nb_barres, As_tot, phi_mm=None):
 def diagramme_interaction(section_type, section_params,
                           fck, fyk=500.0,
                           gamma_c=1.5, gamma_s=1.15,
+                          classe_acier="B", avec_ecrouissage=False,
                           n_div=200, n_piv_A=80, n_piv_B=150, n_piv_C=50):
     """
     Paramètres communs :
@@ -305,10 +356,15 @@ def diagramme_interaction(section_type, section_params,
       fck, fyk : résistances caractéristiques [MPa]
       gamma_c, gamma_s : coefficients partiels matériaux (défaut EC2 usuel :
         1,5 / 1,15)
+      classe_acier : "A", "B" (défaut) ou "C" — NF EN 1992-1-1 Annexe C
+      avec_ecrouissage : False (défaut, palier horizontal) ou True
+        (branche inclinée avec écrouissage) — NF EN 1992-1-1 Figure 3.8
 
     Retourne : N_arr, M_arr [kN, kN·m], mat, pts_cles, fibres, armatures
     """
-    mat = get_material_params(fck, fyk, gamma_c, gamma_s)
+    mat = get_material_params(fck, fyk, gamma_c, gamma_s,
+                              classe_acier=classe_acier,
+                              avec_ecrouissage=avec_ecrouissage)
 
     if section_type == "rect":
         b, h = section_params["b"], section_params["h"]

@@ -48,6 +48,18 @@ with st.sidebar:
     gamma_c = col_g1.number_input("γc", value=1.5, step=0.05, format="%.2f")
     gamma_s = col_g2.number_input("γs", value=1.15, step=0.05, format="%.2f")
 
+    classe_acier = st.selectbox("Classe de ductilité de l'acier", ["A", "B", "C"], index=1,
+                                 help="NF EN 1992-1-1, Annexe C (normative), Tableau C.1 : "
+                                      "A→εuk≥2,5% k≥1,05 ; B→εuk≥5,0% k≥1,08 ; C→εuk≥7,5% k≥1,15. "
+                                      "Défaut B (aciers HA courants en France).")
+    avec_ecrouissage = st.checkbox("Avec écrouissage (branche inclinée)", value=False,
+                                    help="NF EN 1992-1-1, Figure 3.8. Décoché (défaut) : palier "
+                                         "horizontal, σs=fyd au-delà de εyd, quelle que soit la "
+                                         "classe — hypothèse simplifiée, du côté de la sécurité. "
+                                         "Coché : branche supérieure inclinée, σs croît jusqu'à "
+                                         "k·fyk à εuk — exploite la surrésistance garantie de la "
+                                         "classe choisie, plus précis mais moins conservateur.")
+
     st.header("3. Géométrie & ferraillage")
     if forme == "rect":
         col1, col2 = st.columns(2)
@@ -115,6 +127,7 @@ try:
      ) = ec2.diagramme_interaction(
         section_type=forme, section_params=section,
         fck=fck, fyk=fyk, gamma_c=gamma_c, gamma_s=gamma_s,
+        classe_acier=classe_acier, avec_ecrouissage=avec_ecrouissage,
         n_div=300, n_piv_A=150, n_piv_B=200, n_piv_C=100)
 except Exception as e:
     st.error(f"Erreur de calcul : {type(e).__name__} — {e}")
