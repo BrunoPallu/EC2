@@ -800,12 +800,18 @@ def tracer(N_arr=None, M_arr=None, mat=None, pts_cles=None,
     fcd = mat["fcd"] ;  fyd = mat["fyd"]
     As_tot = sum(a[1] for a in arma)
 
+    # Format A3 paysage (420×297mm ≈ 16,54×11,69 pouces) — taille FIXE et
+    # généreuse, plutôt que de compter sur l'auto-ajustement de
+    # bbox_inches="tight" (fragile selon le contenu : légende large avec
+    # plusieurs sollicitations, libellés longs, etc. — peut couper le
+    # haut du diagramme ou déborder la légende selon les cas).
     ncols = 2
-    fig = plt.figure(figsize=(5 * ncols + 2, 10.5), facecolor="#f4f6f9")
+    fig = plt.figure(figsize=(16.54, 11.69), facecolor="#f4f6f9")
     gs  = GridSpec(2, ncols,
                    width_ratios=[3.0, 1.2],
                    height_ratios=[5.6, 1.0],
-                   wspace=0.14, hspace=0.28, figure=fig)
+                   wspace=0.14, hspace=0.30, figure=fig,
+                   left=0.055, right=0.97, top=0.90, bottom=0.06)
 
     ax_nm = fig.add_subplot(gs[0, 0])
     ax_leg = fig.add_subplot(gs[1, :])
@@ -827,7 +833,8 @@ def tracer(N_arr=None, M_arr=None, mat=None, pts_cles=None,
     zone_colors = {"A": "#C62828",   # rouge  — pivot A (traction)
                    "B": "#1565C0",   # bleu   — pivot B (flexion)
                    "C": "#2E7D32"}   # vert   — pivot C (compression)
-    zone_labels = {"A": "Pivot A (traction, εs=εud=45‰)",
+    eud_pct = mat["eps_ud"] * 1e3
+    zone_labels = {"A": f"Pivot A (traction, εs=εud={eud_pct:.1f}‰)",
                    "B": "Pivot B (flexion, εc,sup=εcu2=3,5‰)",
                    "C": "Pivot C (compression, transition B→C + εc2=2‰)"}
 
@@ -929,12 +936,9 @@ def tracer(N_arr=None, M_arr=None, mat=None, pts_cles=None,
             print(f"  {lbl:14s}  NEd={Ned:8.0f}kN  MEd={Med:7.0f}kN·m  →  {tag}")
         print("  " + "─"*56)
 
-    plt.suptitle("Diagramme d'interaction  —  Eurocode 2  (pivots A / B / C)",
-                 fontsize=11, fontweight="bold", y=1.01)
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", message="This figure includes Axes")
-        plt.tight_layout()
-    plt.savefig(nom_fichier, dpi=150, bbox_inches="tight")
+    fig.suptitle("Diagramme d'interaction  —  Eurocode 2  (pivots A / B / C)",
+                 fontsize=13, fontweight="bold", y=0.965)
+    plt.savefig(nom_fichier, dpi=150)
     print(f"\n  Figure sauvegardée : {nom_fichier}")
     plt.show()
 
