@@ -158,8 +158,9 @@ def sigma_s(eps, mat):
         limitée à εud=0,9.εuk) : σs croît linéairement jusqu'à
         k.fyk à εuk (Annexe C, Tableau C.1 pour k et εuk).
 
-    Au-delà de εud : rupture (0.0) — ne doit normalement pas être
-    atteint, le diagramme est construit pour s'arrêter à εud (pivot A).
+    Au-delà de εud (avec une tolérance numérique infime, cf. ci-dessous) :
+    rupture (0.0) — ne doit normalement pas être atteint, le diagramme
+    est construit pour s'arrêter à εud (pivot A).
     """
     Es, fyd, eud = mat["Es"], mat["fyd"], mat["eps_ud"]
     sg = np.sign(eps) if eps != 0 else 1.0
@@ -167,7 +168,16 @@ def sigma_s(eps, mat):
     eps_yd = fyd / Es
     if ae <= eps_yd:
         return Es * eps                          # domaine élastique
-    if ae > eud:
+    # Tolérance numérique : l'état de traction/compression pure (pivot A)
+    # évalue INTENTIONNELLEMENT toutes les fibres exactement à εud — sans
+    # cette marge, un bruit d'arrondi flottant infinitésimal (ε > εud de
+    # 1e-12 par ex.) ferait chuter instantanément σs de sa valeur pleine
+    # à 0 (rupture), créant un artefact numérique visible sur le
+    # diagramme pile à cet endroit (cf. discussion pivot A, section
+    # circulaire). 1e-9 (en déformation absolue) est très largement
+    # au-dessus du bruit flottant typique ici, et très en-dessous de tout
+    # pas de balayage significatif.
+    if ae > eud + 1e-9:
         return 0.0                                # hors pivot A (ne doit pas arriver)
     if not mat.get("avec_ecrouissage", False):
         return sg * fyd                           # branche B : palier horizontal
@@ -203,9 +213,9 @@ def build_deformation_states(mat, h, n_piv_A=80, n_piv_B=120, n_piv_C=40):
     states = []
 
     # ── Pivot A : εbot = -εud (traction pure → pivot A+B) ─────────────────
-    # εtop varie de 0 (traction pure, axe neutre à l'infini côté bas)
-    # jusqu'à εcu2 (pivot A+B)
-    for eps_top in np.linspace(0.0, ecu, n_piv_A, endpoint=False):
+    # εtop varie de -εud (traction pure, déformation uniforme -εud sur
+    # toute la section) jusqu'à εcu2 (transition pivot A→B)
+    for eps_top in np.linspace(-eud, ecu, n_piv_A, endpoint=False):
         states.append((eps_top, -eud))
 
     # ── Pivot B : εtop = εcu2, εbot ∈ [-εud → 0] ─────────────────────────
