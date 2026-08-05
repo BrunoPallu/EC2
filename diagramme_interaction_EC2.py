@@ -243,23 +243,46 @@ def fibres_circ(D, n_div=200):
     return fibres
 
 
-def armatures_rect(h, c_inf, c_sup, As_inf, As_sup):
+def armatures_rect(h, c_inf, c_sup, As_inf, As_sup, phi_inf_mm=None, phi_sup_mm=None):
     """
     Section rectangulaire : deux nappes horizontales.
-    y_inf = -h/2 + c_inf  (fibre basse, tendue en flexion positive)
-    y_sup = +h/2 - c_sup  (fibre haute, comprimée)
+
+    c_inf, c_sup : enrobage AU NU (jusqu'à la surface de la barre — EC2
+    §4.4.1), convention normative standard. La position réelle de l'AXE
+    de la barre (utilisée pour le calcul) est obtenue en ajoutant φ/2 :
+      y_inf = -h/2 + c_inf + φ_inf/2  (fibre basse, tendue en flexion positive)
+      y_sup = +h/2 - c_sup - φ_sup/2  (fibre haute, comprimée)
+
+    phi_inf_mm, phi_sup_mm : diamètre des barres [mm] — si non fourni
+    (None), aucune correction n'est appliquée (comportement historique,
+    c_inf/c_sup traités comme déjà "à l'axe" — à éviter pour du nouveau
+    code, conservé uniquement pour compatibilité ascendante).
     """
-    y_inf = -h / 2.0 + c_inf
-    y_sup = +h / 2.0 - c_sup
+    d_inf = (phi_inf_mm / 1000.0 / 2.0) if phi_inf_mm else 0.0
+    d_sup = (phi_sup_mm / 1000.0 / 2.0) if phi_sup_mm else 0.0
+    y_inf = -h / 2.0 + c_inf + d_inf
+    y_sup = +h / 2.0 - c_sup - d_sup
     arma = []
     if As_sup > 0: arma.append((y_sup, As_sup))
     if As_inf > 0: arma.append((y_inf, As_inf))
     return arma
 
 
-def armatures_circ(D, c_enr, nb_barres, As_tot):
-    """n barres uniformément réparties sur cercle de diam. D - 2·c."""
-    Rs     = (D - 2.0 * c_enr) / 2.0
+def armatures_circ(D, c_enr, nb_barres, As_tot, phi_mm=None):
+    """
+    n barres uniformément réparties sur un cercle.
+
+    c_enr : enrobage AU NU (jusqu'à la surface de la barre — EC2 §4.4.1),
+    convention normative standard. Le rayon réel du cercle des AXES des
+    barres (utilisé pour le calcul) est D/2 - c_enr - φ/2.
+
+    phi_mm : diamètre des barres [mm] — si non fourni (None), aucune
+    correction n'est appliquée (comportement historique, c_enr traité
+    comme déjà "à l'axe" — à éviter pour du nouveau code, conservé
+    uniquement pour compatibilité ascendante).
+    """
+    d_bar = (phi_mm / 1000.0 / 2.0) if phi_mm else 0.0
+    Rs     = D / 2.0 - c_enr - d_bar
     As_bar = As_tot / nb_barres
     return [(Rs * np.sin(np.pi / 2 + 2 * np.pi * i / nb_barres), As_bar)
             for i in range(nb_barres)]
@@ -294,7 +317,9 @@ def diagramme_interaction(section_type, section_params,
                                   section_params["c_inf"],
                                   section_params["c_sup"],
                                   section_params["As_inf"],
-                                  section_params["As_sup"])
+                                  section_params["As_sup"],
+                                  phi_inf_mm=section_params.get("phi_inf_mm"),
+                                  phi_sup_mm=section_params.get("phi_sup_mm"))
         H = h
         Ac = b * h
 
@@ -304,7 +329,8 @@ def diagramme_interaction(section_type, section_params,
         arma   = armatures_circ(D,
                                 section_params["c_enr"],
                                 section_params["nb_barres"],
-                                section_params["As_tot"])
+                                section_params["As_tot"],
+                                phi_mm=section_params.get("phi_mm"))
         H  = D
         Ac = np.pi * (D / 2) ** 2
     else:
@@ -461,8 +487,10 @@ def dessiner_section(ax_sec, ax_info, section_type, section_params, mat, arma, A
         # omettre la nappe (ce qui pouvait laisser croire à un oubli plutôt
         # qu'à un choix de ferraillage volontaire).
         r_b = 0.022
-        y_sup = (+h_s/2 - c_sup_s) * sc
-        y_inf = (-h_s/2 + c_inf_s) * sc
+        _phi_sup_mm = section_params.get("phi_sup_mm") or 0.0
+        _phi_inf_mm = section_params.get("phi_inf_mm") or 0.0
+        y_sup = (+h_s/2 - c_sup_s - _phi_sup_mm/1000/2) * sc
+        y_inf = (-h_s/2 + c_inf_s + _phi_inf_mm/1000/2) * sc
 
         def _draw_nappe(y_pos, As_val, nb_reel):
             if As_val > 1e-9:
@@ -501,11 +529,11 @@ def dessiner_section(ax_sec, ax_info, section_type, section_params, mat, arma, A
         COL_ENR = "#2E7D32"
         ax_sec.annotate("", xy=(-bS/2-0.06, hS/2), xytext=(-bS/2-0.06, y_sup),
                         arrowprops=dict(arrowstyle="<->", color=COL_ENR, lw=1.0))
-        ax_sec.text(-bS/2-0.09, (hS/2+y_sup)/2, f"c_sup={c_sup_s*100:.1f}cm",
+        ax_sec.text(-bS/2-0.09, (hS/2+y_sup)/2, f"c_sup={c_sup_s*100:.1f}cm (nu)",
                     fontsize=6.5, color=COL_ENR, ha="right", va="center", fontweight="bold")
         ax_sec.annotate("", xy=(-bS/2-0.06, -hS/2), xytext=(-bS/2-0.06, y_inf),
                         arrowprops=dict(arrowstyle="<->", color=COL_ENR, lw=1.0))
-        ax_sec.text(-bS/2-0.09, (-hS/2+y_inf)/2, f"c_inf={c_inf_s*100:.1f}cm",
+        ax_sec.text(-bS/2-0.09, (-hS/2+y_inf)/2, f"c_inf={c_inf_s*100:.1f}cm (nu)",
                     fontsize=6.5, color=COL_ENR, ha="right", va="center", fontweight="bold")
 
         box_beton = (f" fck=C{mat['fck']:.0f}   fcd={mat['fcd']:.1f} MPa\n"
@@ -519,9 +547,10 @@ def dessiner_section(ax_sec, ax_info, section_type, section_params, mat, arma, A
     else:  # circulaire
         D_s  = section_params["D"]
         c_e  = section_params["c_enr"]
+        _phi_c_mm = section_params.get("phi_mm") or 0.0
         sc   = 0.46 / (D_s / 2)
         R_d  = D_s / 2 * sc
-        Rs_d = (D_s / 2 - c_e) * sc
+        Rs_d = (D_s / 2 - c_e - _phi_c_mm/1000/2) * sc
         ax_sec.add_patch(plt.Circle((0,0), R_d,  fc="#cdd9ee", ec="#333", lw=1.5))
         ax_sec.add_patch(plt.Circle((0,0), Rs_d, fill=False, ec="#999",
                                      ls="--", lw=0.8))
@@ -545,7 +574,7 @@ def dessiner_section(ax_sec, ax_info, section_type, section_params, mat, arma, A
         ax_sec.annotate("", xy=(x_int, y_int), xytext=(x_ext, y_ext),
                         arrowprops=dict(arrowstyle="<->", color="#2E7D32", lw=1.1))
         x_lbl, y_lbl = (R_d+0.09)*np.cos(a_enr), (R_d+0.09)*np.sin(a_enr)
-        ax_sec.text(x_lbl, y_lbl, f"c={c_e*100:.1f}cm", fontsize=7,
+        ax_sec.text(x_lbl, y_lbl, f"c={c_e*100:.1f}cm (nu)", fontsize=7,
                     color="#2E7D32", ha="center", va="center", fontweight="bold")
 
         box_beton = (f" fck=C{mat['fck']:.0f}   fcd={mat['fcd']:.1f} MPa\n"

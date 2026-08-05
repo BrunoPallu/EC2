@@ -53,8 +53,12 @@ with st.sidebar:
         col1, col2 = st.columns(2)
         b = col1.number_input("b [m]", value=1.00, step=0.05, min_value=0.05)
         h = col2.number_input("h [m]", value=0.40, step=0.05, min_value=0.05)
-        c_sup = col1.number_input("Enrobage sup. [m]", value=0.055, step=0.005, format="%.3f")
-        c_inf = col2.number_input("Enrobage inf. [m]", value=0.055, step=0.005, format="%.3f")
+        c_sup = col1.number_input("Enrobage sup. — au nu [m]", value=0.055, step=0.005, format="%.3f",
+                                   help="Distance entre le parement du béton et la surface de la barre "
+                                        "la plus proche (EC2 §4.4.1) — pas l'axe de la barre.")
+        c_inf = col2.number_input("Enrobage inf. — au nu [m]", value=0.055, step=0.005, format="%.3f",
+                                   help="Distance entre le parement du béton et la surface de la barre "
+                                        "la plus proche (EC2 §4.4.1) — pas l'axe de la barre.")
 
         st.markdown("**Nappe supérieure**")
         col1, col2 = st.columns(2)
@@ -70,17 +74,21 @@ with st.sidebar:
         As_inf = nb_inf * np.pi * (phi_inf / 1000 / 2) ** 2
         section = dict(b=b, h=h, c_inf=c_inf, c_sup=c_sup,
                         As_inf=As_inf, As_sup=As_sup,
-                        nb_sup=nb_sup, nb_inf=nb_inf)
+                        nb_sup=nb_sup, nb_inf=nb_inf,
+                        phi_sup_mm=phi_sup, phi_inf_mm=phi_inf)
     else:
         col1, col2 = st.columns(2)
         D = col1.number_input("D [m]", value=0.60, step=0.05, min_value=0.05)
-        c_enr = col2.number_input("Enrobage [m]", value=0.070, step=0.005, format="%.3f")
+        c_enr = col2.number_input("Enrobage — au nu [m]", value=0.070, step=0.005, format="%.3f",
+                                   help="Distance entre le parement du béton et la surface de la barre "
+                                        "(EC2 §4.4.1) — pas l'axe de la barre.")
         col1, col2 = st.columns(2)
         nb_barres = col1.number_input("Nb barres", value=12, step=1, min_value=3)
         phi_barre = col2.number_input("Ø barres [mm]", value=16.0, step=1.0)
 
         As_tot = nb_barres * np.pi * (phi_barre / 1000 / 2) ** 2
-        section = dict(D=D, c_enr=c_enr, nb_barres=nb_barres, As_tot=As_tot)
+        section = dict(D=D, c_enr=c_enr, nb_barres=nb_barres, As_tot=As_tot,
+                        phi_mm=phi_barre)
 
     st.header("4. Sollicitations à vérifier (optionnel)")
     sol_txt = st.text_area("Une ligne par cas : N [kN], M [kN·m], label",
